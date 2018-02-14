@@ -1,0 +1,11 @@
+Package: pupilr
+Type: Package
+Title: Manage and Analyze The Pupillometry Project
+Version: 0.1
+Date: 2016-05-18
+Author: Zachary Burchill
+Maintainer: zach.burchill+pupilr@gmail.com
+Description: This package is the public version of the one which manages Zachary Burchill's pupillometry (eye-tracking) project. (The original is stored as part of a private repository on Bitbucket for confidentiality reasons.) This package has three primariy uses. First, it pre-processes the raw data (which has personally identifiable information and is thus stored on a secure remote server) when run on the data server so that the accessible data no longer has participant information in it. Second, it bundles this data together in a nice, portable package. Third, it provides a number of helpful functions to further process the eye-tracking data for analysis and plotting.
+License: IT'S ALL MINE
+LazyData: TRUE
+RoxygenNote: 5.0.1
