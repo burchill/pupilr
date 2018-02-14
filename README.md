@@ -1,4 +1,4 @@
-# pupilr: a data-managing package
+# pupilr: a package to manage a series of eye-tracking experiments
 
 This package is the public version of the one which manages a pupillometry (eye-tracking) project. (The original R package is stored as part of a private repository on Bitbucket for confidentiality reasons.)
 
