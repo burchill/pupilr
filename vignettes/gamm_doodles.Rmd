@@ -1,0 +1,863 @@
+---
+title: "MTurk Pupillometry Analysis (Exposure)"
+author: "Zach Burchill"
+date: \today
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{siunitx}
+  - \usepackage{tabto}
+  - \usepackage{soul}
+  - \usepackage{xcolor}
+  - \usepackage{placeins}
+  - \usepackage{lscape}
+  - \newcommand{\blandscape}{\begin{landscape}}
+  - \newcommand{\elandscape}{\end{landscape}}
+  - \makeatletter\renewcommand{\fps@table}{!ht}\makeatother
+  - \setstcolor{red}
+  - \usepackage{sectsty}
+  - \sectionfont{\color{red}} 
+  - \subsectionfont{\color{red}}
+  - \subsubsectionfont{\color{red}}
+  - \paragraphfont{\color{red}}
+  - \subparagraphfont{\color{red}}
+output:
+  pdf_document:
+    fig_caption: true
+    toc: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r set-options, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(comment="", 
+               autodep = TRUE,
+                 cache=FALSE, 
+               echo=FALSE, 
+               warning=FALSE, message=FALSE)
+```
+
+```{r libraries}
+# Kodi's libraries
+library(dplyr) # uses pre-0.5 version
+library(magrittr)
+library(stringr)
+library(ggplot2)
+library(ggthemes)
+require(lme4)
+library(lmerTest)
+library(tidyr)
+library(grid)
+library(gridExtra)
+
+library(mgcv)
+library(itsadug)
+
+library(pupilr)
+library(zplyr)
+
+source("/Users/zburchill/clarkegarrett2004/Exp1/Analysis/helper_functions/create_lmer_table.R")
+```
+
+```{r functions}
+
+# Given a ggplot object, a dataframe, a list of vectors of conditions, and a list of names, builds a plot
+build_facet_plot <-function(p,df,l_of_v,l_of_titles,rect_df=FALSE) {
+    combined_ls<-purrr::map2(l_of_v,l_of_titles,list)
+    v <- purrr::reduce(combined_ls,
+                  function(a,b) {
+                    
+                    if (rect_df==FALSE) {
+                        t <- a
+                    } else {
+                      t <- a + geom_rect(data = transform(rect_df,Comparison=b[[2]]), 
+                                         aes(xmin = xstart_rect, xmax = xend_rect,
+                                             ymin = -Inf, ymax = Inf),
+                                         fill = rect_df$colors,inherit.aes = FALSE)
+                    }
+
+                    t <- t + stat_summary(fun.data="mean_cl_boot", geom="errorbar", width=0.25,
+                                          data=transform(subset(df,Condition %in% b[[1]]),
+                                                         Comparison=b[[2]]))
+                    t <- t + stat_summary(fun.y=mean,geom="point",
+                                          data=transform(subset(df,Condition %in% b[[1]]),
+                                                         Comparison=b[[2]]))
+                    t <- t + stat_summary(fun.y=mean,geom="line",
+                                          data=transform(subset(df,Condition %in% b[[1]]),
+                                                         Comparison=b[[2]]))
+                    return(t)}, 
+                  .init=p)
+    v <- v + facet_wrap(~Comparison)
+    return(v)
+}
+
+
+## ------------------------------------------ 
+# Change font color with proper rendering across latex and html outputs
+# credit to Nicholas Hamilton (http://stackoverflow.com/questions/29067541/rmarkdown-how-to-change-the-font-color)
+font_color = function(x, color){
+  outputFormat = opts_knit$get("rmarkdown.pandoc.to")
+  if(outputFormat == 'latex')
+    paste("\\textcolor{",color,"}{",x,"}",sep="")
+  else if(outputFormat == 'html')
+    paste("<font color='",color,"'>",x,"</font>",sep="")
+  else
+    x
+}
+```
+
+```{r color and plot stuff}
+#color scheme for accented stuff (dark to light): #e6550d #fdae6b #fee6ce
+#color scheme for unaccented stuff (''): #3182bd #9ecae1 #deebf7
+color_values <- c("accented" = "#e6550d", "unaccented" = "#3182bd",
+              "accented new" = "#fdae6b","unaccented new" = "#9ecae1")
+```
+
+```{r load data,warning=TRUE,message=TRUE}
+d.all <- d.ex2# %>% filter(Run!="Exp2v2")
+d.all$ExpRun <- ifelse(d.all$Run=="Exp2v2", "Run2","Run1")
+d.noexp1 <- d.ex1
+# print("Does the data pass the sanity check?")
+# sanity_check_data(d.all,pilot=FALSE)
+# sanity_check_data(d.noexp1,pilot=FALSE)
+d.all$PartOfExp <- factor(d.all$PartOfExp,levels=c("practice","main","baseline"))
+d.noexp1$PartOfExp <- factor(d.noexp1$PartOfExp,levels=c("practice","main","baseline"))
+
+# Load data for wording test
+d.wording <- d.ex1_wording_test
+d.wording$PartOfExp <- factor(d.wording$PartOfExp,levels=c("practice","main","newtest","baseline"))
+#d.wording$PartOfExp <- ifelse(d.wording$PartOfExp == "newtest","baseline",d.wording$PartOfExp)
+#d.wording$Condition <- "New"
+#d.wording$LoadTime <- NULL
+
+# Load data for the exposure blocks
+d.exposure_trials <- d.ex2.exposure
+d.catch_trials <- d.exposure_trials %>% 
+  group_by(WorkerId) %>%
+  summarise(Misses=sum(ifelse(isCatch==TRUE & pressedSpace==FALSE,1,0)),
+         FalsePositives=sum(ifelse(isCatch==FALSE & pressedSpace==TRUE,1,0)),
+         AvgCorrectRT=mean(RT[isCatch==TRUE & pressedSpace==TRUE]))
+
+# Load in language background free response questions
+d.LgFreeNoExp <- read.csv("/Users/zburchill/clarkegarrett2004/Exp1/Analysis/no_exposure_pupillometry_language_free_response.csv")
+d.LgFreeExp <- read.csv("/Users/zburchill/clarkegarrett2004/Exp2/Analysis/exposure_pupil_lgbackground_free_response.csv") %>% select(WorkerId,LgRating)
+suppressWarnings( d.all <- left_join(d.all,d.LgFreeExp,by="WorkerId") )
+suppressWarnings( d.noexp1 <- left_join(d.noexp1, d.LgFreeNoExp,by="WorkerId") )
+suppressWarnings( d.wording <-left_join(d.wording,d.LgFreeNoExp,by="WorkerId") )
+
+# calculate subject-wise mean RT for each Block
+d.all <- initialize_scores(d.all)
+d.noexp1 <- initialize_scores(d.noexp1)
+d.wording <- initialize_scores(d.wording)
+
+# Prepare some new survey questions
+d.all <- d.all %>% 
+  mutate_each(
+    funs(factor(.,
+      levels=c("","dont_remember","never","hardly","sometimes","weekly","daily_plus"))),
+    matches("last_week|last_month|childhood"))
+```
+
+```{r outlier-exclusion-step1-1, echo = FALSE}
+duplicate_turkers <- d.all %>% select(WorkerId,UniqueID) %>%
+  rbind(d.noexp1 %>% select(WorkerId,UniqueID),
+        d.wording %>% select(WorkerId,UniqueID)) %>%
+  distinct(WorkerId,UniqueID,.keep_all=TRUE) %>%
+  group_by(WorkerId) %>% 
+  tally() %>%
+  filter(n > 1)
+
+if (nrow(duplicate_turkers) > 0) {
+  print("WARNING! DUPLICATE TURKERS! DO SOMETHING ABOUT THIS BETTER THAN WHAT WE HAVE RIGHT NOW!")
+}
+
+## ----------------------------------------
+# collect all non eligible subjets into a single df
+non_eligible_subjs_all <- pupilr::non_eligible_participants_f(
+  d.all,
+  duplicate_turkers = duplicate_turkers,
+  newsurvey = TRUE)
+non_eligible_subjs_word <- pupilr::non_eligible_participants_f(
+  d.wording,
+  duplicate_turkers = duplicate_turkers,
+  newsurvey = FALSE)
+non_eligible_subjs_noexp <- pupilr::non_eligible_participants_f(
+  d.noexp1,
+  duplicate_turkers = duplicate_turkers,
+  newsurvey = FALSE)
+
+## ----------------------------------------
+# remove those inelligible subjects 
+dat_out1 <- d.all %>%
+  filter(
+    !(WorkerId %in% non_eligible_subjs_all$WorkerId)
+  )
+dat_noexp_out1 <- d.noexp1 %>%
+  filter(
+    !(WorkerId %in% non_eligible_subjs_noexp$WorkerId)
+  )
+d.wording_out <- d.wording %>%
+  filter(
+    !(WorkerId %in% non_eligible_subjs_word$WorkerId)
+  )
+```
+
+```{r outlier-removal-step2, echo = FALSE}
+dat_out2 <- pupilr::exclude_extreme_rts_f(dat_out1)
+d.wording_out2 <- pupilr::exclude_extreme_rts_f(d.wording_out)
+dat_noexp_out2 <- pupilr::exclude_extreme_rts_f(dat_noexp_out1)
+```
+
+```{r calculate adjusted RTs}
+# calculate each subject's mean Baseline RT
+# and subtract that value from experimental RTs
+dat_out2 <- pupilr::calculate_adjustedRT_f(dat_out2)
+dat_noexp_out2 <- pupilr::calculate_adjustedRT_f(dat_noexp_out2)
+d.wording_out2 <- pupilr::calculate_adjustedRT_f(d.wording_out2)
+```
+
+# Quick recap
+
+In this somewhat replication of C&G'04, we had participants listen to chunks of a story read by their exposure talkers between each block of the RT task, with the intent that this would give them even more exposure to adapt to, letting us study accent adaptation over a longer scale.  We had planned to look at how pupil dilation corresponds to accent adaptation after this behavioral study turned out ok.
+
+Although the experiments without the exposure passages seemed encouraging, the results from the experiments with exposure passages interspersed with the C&G task were somewhat confusing--each time the participants came back to the task, it seemed that their response times reset, especially for the first one or two trials.  These non-linearities prompted us to approach the problem with GAM models. We discussed using the three exposure blocks for each condition to make predictions about the test block, but I can't quite remember the comparisons we had planned.
+
+Regardless, I've implemented a few different sorts of predictions that the GAM model could make about the test block---namely how the model would predict the responses if the participants heard the test block with the same talker as exposure (i.e. participants in the unaccented condition heard the same unaccented talker for test) and if all the participants heard the accented talker in test (as was done in the actual experiment).  Predicting the data in the test block given only the exposure (during which each participant only heard one talker) lets us establish a baseline to compare the actual results.
+
+# The GAMM stuff
+
+## Setting up the data frame
+
+Just the nitty-gritty about what I used in the GAM model. Feel free to skip.
+
+```{r setting up exp2 dataframe,echo=TRUE}
+d.gamm <- dat_out2 %>%
+  filter(Condition %in% c("accented","unaccented") &
+           Run %in% c("Exp2v1","ExpPilotv1","Exp2v2")) %>%
+  within(., {
+    Word <- factor(Word)
+    WorkerId <- factor(WorkerId)
+    # sum coding for accent condition
+    Condition <- factor(Condition, levels = c("unaccented","accented"))
+  	contrasts(Condition) <- cbind("accented" = c(-1,1))
+  	# Make the unordered version of Condition 
+  	Condition.unordered <- Condition
+  	# Make the ordered version
+  	Condition <- ordered(Condition)
+  	Trial <- TrialInExperiment-max(Trial[Block=="0"])
+  	Trial.c <- Trial-12.5
+  	BlockTrial <- Trial-floor((Trial-1)/8)*8
+  	BlockTrial.c <- BlockTrial-mean(BlockTrial)
+  }) %>%
+  filter(Block %in% c("1","2","3")) %>%
+  within(., {
+    # Make Block an ordered factor with helmert coding
+    Block <- factor(Block)
+    Block <- as.ordered(Block)
+    contrasts(Block) <- contr.helmert(3)
+    colnames(contrasts(Block)) <- c("Block:2v1","Block:3v12")
+    
+    # Make a continuous variable `Block`
+    BlockContinuous <- ifelse(Block=="1",1,
+                       ifelse(Block=="2",2,
+                       ifelse(Block=="3",3,NA)))
+    
+    # Make a factor of the combination of `Block` and `Condition`
+    BlockXCondition <- factor(paste0(Condition,"-",Block))
+    
+  	# sum contrast code List (counterbalancing nuisance factor)
+  	List <- factor(List)
+    contrasts(List) <- contr.sum(nlevels(List))
+    colnames(contrasts(List)) <- rownames(contrasts(List))[1:(length(levels(List))-1)]
+    
+    # sum code ListID
+    # Currently considers the new runs completely unrelated
+    ListID <- sapply(List,function(x){as.numeric(strsplit(as.character(x),"_")[[1]][3])},
+                            USE.NAMES = FALSE)
+    ListID <- factor(ifelse(Run=="Exp2v2",
+                            paste0(ListID,"_new"),
+                            ListID))
+    contrasts(ListID) <- contr.sum(nlevels(ListID))
+    
+    #sum code ListOrder
+    ListOrder <- factor(sapply(List,function(x){strsplit(as.character(x),"_")[[1]][4]},
+                            USE.NAMES = FALSE))
+    contrasts(ListOrder) <- contr.sum(nlevels(ListOrder))
+    }) %>%
+  as.data.frame()
+```
+
+```{r setting up other exp dataframes}
+d.gamm.ex1 <- dat_noexp_out2 %>%
+  filter(Condition %in% c("accented","unaccented") &
+           Run %in% c("Exp1V1",  "PilotV3", "PilotV2")) %>%
+  within(., {
+    Word <- factor(Word)
+    WorkerId <- factor(WorkerId)
+    # sum coding for accent condition
+    Condition <- factor(Condition, levels = c("unaccented","accented"))
+  	contrasts(Condition) <- cbind("accented" = c(-1,1))
+  	# Make the unordered version of Condition 
+  	Condition.unordered <- Condition
+  	# Make the ordered version
+  	Condition <- ordered(Condition)
+  	Trial <- TrialInExperiment-max(Trial[Block=="0"])
+  	Trial.c <- Trial-mean(Trial)
+  	BlockTrial <- Trial-floor((Trial-1)/8)*8
+  	BlockTrial.c <- BlockTrial-mean(BlockTrial)
+  }) %>%
+  filter(Block %in% c("1","2","3")) %>%
+  within(., {
+    # Make Block an ordered factor with helmert coding
+    Block <- factor(Block)
+    Block <- as.ordered(Block)
+    contrasts(Block) <- contr.helmert(3)
+    colnames(contrasts(Block)) <- c("Block:2v1","Block:3v12")
+    
+    # Make a continuous variable `Block`
+    BlockContinuous <- ifelse(Block=="1",1,
+                       ifelse(Block=="2",2,
+                       ifelse(Block=="3",3,NA)))
+    
+    # Make a factor of the combination of `Block` and `Condition`
+    BlockXCondition <- factor(paste0(Condition,"-",Block))
+    
+  	# sum contrast code List (counterbalancing nuisance factor)
+  	List <- factor(List)
+    contrasts(List) <- contr.sum(nlevels(List))
+    colnames(contrasts(List)) <- rownames(contrasts(List))[1:(length(levels(List))-1)]
+    
+    # sum code ListID
+    # Currently considers the new runs completely unrelated
+    # ListID <- sapply(List,function(x){as.numeric(strsplit(as.character(x),"_")[[1]][3])},
+    #                         USE.NAMES = FALSE)
+    # ListID <- factor(ifelse(Run=="Exp2v2",
+    #                         paste0(ListID,"_new"),
+    #                         ListID))
+    # contrasts(ListID) <- contr.sum(nlevels(ListID))
+    # 
+    # #sum code ListOrder
+    # ListOrder <- factor(sapply(List,function(x){strsplit(as.character(x),"_")[[1]][4]},
+    #                         USE.NAMES = FALSE))
+    # contrasts(ListOrder) <- contr.sum(nlevels(ListOrder))
+    }) %>%
+  as.data.frame()
+
+d.gamm.wording <- d.wording_out2 %>%
+  # filter(Condition %in% c("accented","unaccented") &
+           # Run %in% c("Exp1V1",  "PilotV3", "PilotV2")) %>%
+  within(., {
+    Word <- factor(Word)
+    WorkerId <- factor(WorkerId)
+    # sum coding for accent condition
+    Condition <- factor(Condition, levels = c("unaccented","accented"))
+  	contrasts(Condition) <- cbind("accented" = c(-1,1))
+  	# Make the unordered version of Condition 
+  	Condition.unordered <- Condition
+  	# Make the ordered version
+  	Condition <- ordered(Condition)
+  	Trial <- TrialInExperiment-max(Trial[Block=="0"])
+  	Trial.c <- Trial-mean(Trial)
+  	BlockTrial <- Trial-floor((Trial-1)/8)*8
+  	BlockTrial.c <- BlockTrial-mean(BlockTrial)
+  }) %>%
+  filter(Block %in% c("1","2","3")) %>%
+  within(., {
+    # Make Block an ordered factor with helmert coding
+    Block <- factor(Block)
+    Block <- as.ordered(Block)
+    contrasts(Block) <- contr.helmert(3)
+    colnames(contrasts(Block)) <- c("Block:2v1","Block:3v12")
+    
+    # Make a continuous variable `Block`
+    BlockContinuous <- ifelse(Block=="1",1,
+                       ifelse(Block=="2",2,
+                       ifelse(Block=="3",3,NA)))
+    
+    # Make a factor of the combination of `Block` and `Condition`
+    BlockXCondition <- factor(paste0(Condition,"-",Block))
+    
+  	# sum contrast code List (counterbalancing nuisance factor)
+  	List <- factor(List)
+    contrasts(List) <- contr.sum(nlevels(List))
+    colnames(contrasts(List)) <- rownames(contrasts(List))[1:(length(levels(List))-1)]
+    
+    # sum code ListID
+    # Currently considers the new runs completely unrelated
+    # ListID <- sapply(List,function(x){as.numeric(strsplit(as.character(x),"_")[[1]][3])},
+    #                         USE.NAMES = FALSE)
+    # ListID <- factor(ifelse(Run=="Exp2v2",
+    #                         paste0(ListID,"_new"),
+    #                         ListID))
+    # contrasts(ListID) <- contr.sum(nlevels(ListID))
+    # 
+    # #sum code ListOrder
+    # ListOrder <- factor(sapply(List,function(x){strsplit(as.character(x),"_")[[1]][4]},
+    #                         USE.NAMES = FALSE))
+    # contrasts(ListOrder) <- contr.sum(nlevels(ListOrder))
+    }) %>%
+  as.data.frame()
+
+```
+
+## Logic of the model
+
+I begin by making my assumptions clear (or as clear as I can).  The model will predict `AdjustedRT` (the adjusted reaction times) with the following linear predictors:
+
+Linear predictors:
+
+ * ~~~Block number (`BlockContinuous`), 1-3, so we can extend our predictions to Block 4, as a linear predictor~~~
+ * Exposure condition (`Condition`), a binary centered ordered factor (1 and -1), as a linear predictor (so that we can more easily test differences between conditions)
+ * ~~~The interaction of `Block` and `Condition`, as a linear predictor~~~
+ 
+ Non-linear predictors:
+ 
+ * **`r font_color("Block number (BlockContinuous), 1-3, so we can extend our predictions to Block 4, as a linear predictor.", color="red")`**  I decided to not have Block number as a linear _and_ non-linear predictor.
+ * Within-block trial number (`BlockTrial`), 1-8, then centered around the mean (i.e. 4.5), as a continuous variable, as a non-linear predictor
+ * The interaction of `Block` and `BlockTrial`, so that different smooths for `BlockTrial` are fitted to each level of `Block`, as a non-linear predictor. Because `Block` is an ordered factor, the smooths for each level of the factor will be a "reference" smooth for the first level and "difference" smooths for all the other levels, representing the difference from the reference. (I'm not actually sure how/if the coding of the factor actually does anything if each level gets its own smooth. In fact, I'm pretty sure the coding doesn't matter at all in the interaction, based on examples from the package)
+ * The interaction of `Condition` and `BlockTrial`, so that different smooths for `BlockTrial` are fitted to each level of `Condition`
+ * The interaction of `BlockTrial` and the combination of `Condition` and `Block`, so that different smooths for `BlockTrial` are fitted to each combination of `Condition` and `Block`
+ 
+ Random effects:
+ 
+ * **Maybe:** Factor smooths for `BlockTrial` each participant (`WorkerId`), so that each participant has their own smooth fitted for `BlockTrial` (also maybe: the same smoothing parameter for each participant)
+ * Random intercepts for the audio clips (i.e. a cross of sentence and talker)
+ 
+ 
+## Potential issues:
+
+### Setting the $k$ basis functions
+
+`BlockTrial` only has 8 values (1-8) and `BlockContinuous` only has 3 (1-3). [Jacolien van Rij](http://www.sfs.uni-tuebingen.de/~jvanrij/Tutorial/GAMM.html#parameters-of-smooth-functions) says the following:
+
+> "Note that the model will base the number of base functions (reflected in the `edf` of the summary) on the data with the setting for `k` as upper bound. *By default, the value of `k` for `s()` is around 9, and for `te()` and `ti()` 5 per dimension.* Importantly, the value of `k` should be at most one less than the number of unique data points, otherwise it will fit the density of that predictor.
+
+The [`mgcv` documentation](https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/choose.k.html) says the following: 
+
+> "When setting up models in the `mgcv` package, using `s` or `te` terms in a model formula, `k` must be chosen: the defaults are essentially arbitrary.
+
+To me, this means that since our variables have so few different values, we should manually set `k` so that it's one less than the number of unique data points for all non-linear predictors, and completely ignore defaults.
+
+### Including linear _and_ non-linear versions of variables 
+
+In the current model, I've included both linear and non-linear versions of `BlockContinuous` and `Condition`.
+
+### Finnicky details in GAM models
+
+There's also the possibility that something about the way I fit the model is unoptimal.  There are a bunch of finnicky things that I tried to account for, but I'm no expert, so I might have gotten them wrong.  For example, I tried to set the _k_ basis functions as well as I understand them, but I'm not 100% confident in them.  Likewise, choices such as whether to center certain variables, whether to use factors vs. continuous predictors vs. ordered factors, etc.
+
+The aspect I'm least sure is the `d` parameter in `mgcv::ti`. The predictors in my interactions are _not_ on the same scale, and I _think_ the default for `mgcv::ti` assumes that, but I can't really make heads or tails of the documentation.
+
+
+## The model
+
+This model is only fit to correct responses.
+
+```{r gamm stuff,echo=TRUE,cache=TRUE}
+m.full.block_contin <- gam(AdjustedRT ~ 
+      # Linear predictors
+      Condition + #BlockContinuous + BlockContinuous:Condition +
+      # Non linear predictors
+      ti(BlockContinuous, k=3) +
+      ti(BlockTrial, k=7) +
+      ti(BlockContinuous, by=Condition, k=3) +
+      ti(BlockTrial, BlockContinuous, k=3) +
+      ti(BlockTrial, by=Condition, k=7) +
+      ti(BlockTrial, BlockContinuous, by=Condition, k=3) +
+      # Random effects
+      s(WorkerId, bs="re") + #Random intercept
+      s(WorkerId, BlockTrial, bs="re"),  # Random slope
+    data = d.gamm %>% filter(BinaryCorrect==1)
+      )
+summary(m.full.block_contin)
+```
+
+# GAMM plots
+
+These are plots of the components of the model.  I can't really decipher the interaction plots, but the splines seem relatively interpretable.
+
+I made the `Condition` variable an ordered factor in the model---from what I understand, this means that the splines that have `:Conditionaccented` in the y axis are "difference" smooths---how the `accented` splines differ from the `unaccented` ones.
+
+It seems that `Condition` doesn't really change the slope of the effect of Block number (`BlockContinuous`), although it seems to be doing something with the effect of the trial number within the block (`BlockTrial`).
+
+```{r gamm plots}
+plot(m.full.block_contin,pages=2)
+```
+
+
+```{r unused gam models,echo=FALSE}
+# 
+# # The model:
+# gam(AdjustedRT ~ 
+#       # Linear predictors
+#       Block + Condition + Block:Condition +
+#       # Non linear predictors
+#       ti(BlockTrial, k=7) + 
+#       ti(BlockTrial, by=Block, k=7) +
+#       ti(BlockTrial, by=Condition, k=7) +
+#       ti(BlockTrial, by=BlockXCondition, k=7) + 
+#       # Random effects
+#       s(WorkerId, bs="re") + #Random intercept
+#       s(WorkerId, BlockTrial, bs="re") + # Random slope
+#       # Possible!!?!?
+#       s(BlockTrial, WorkerId, bs="fs", m=1),
+#     data=d.gamm)
+# 
+# m.full <- gam(AdjustedRT ~ 
+#       # Linear predictors
+#       Block*Condition +
+#       # Non linear predictors
+#       ti(BlockTrial, k=7) +
+#       ti(BlockTrial, by=Block, k=7) +
+#       ti(BlockTrial, by=Condition, k=7) +
+#       ti(BlockTrial, by=BlockXCondition, k=7) +
+#       # Random effects
+#       s(WorkerId, bs="re") + #Random intercept
+#       s(WorkerId, BlockTrial, bs="re"),
+#     data=d.gamm)
+# summary(m.full)
+# plot(m.full,pages=2)
+# 
+# 
+# m.full.block_contin <- gam(AdjustedRT ~ 
+#       # Linear predictors
+#       Condition*BlockContinuous +
+#       # Non linear predictors
+#       ti(BlockContinuous, k=3) +
+#       ti(BlockTrial, k=7) +
+#       ti(BlockContinuous, by=Condition, k=3) +
+#       ti(BlockTrial, BlockContinuous, k=3) +
+#       ti(BlockTrial, by=Condition, k=7) +
+#       ti(BlockTrial, BlockContinuous, by=Condition, k=3) +
+#       # Random effects
+#       s(WorkerId, bs="re") + #Random intercept
+#       s(WorkerId, BlockTrial, bs="re"),  # Random slope
+#     data=d.gamm #%>%
+#       #mutate(Condition=ifelse(Condition=="accented",1,0))
+#       )
+# summary(m.full.block_contin)
+# 
+# m.simple <- gam(AdjustedRT ~ 
+#       # Linear predictors
+#       Block + Condition +
+#       # Non linear predictors
+#       ti(BlockTrial, k=7) +
+#       ti(BlockTrial, by=Block, k=7) +
+#       ti(BlockTrial, by=Condition, k=7) +
+#       # Random effects
+#       s(WorkerId, bs="re") + #Random intercept
+#       s(WorkerId, BlockTrial, bs="re"),
+#     data=d.gamm)
+# summary(m.simple)
+# plot(m.simple,pages=1)
+```
+
+```{r making block 4s}
+# Have participants hear a test block with the same accent
+d.gamm.fake_extended.block4 <- d.gamm %>% filter(BlockContinuous==3) %>%
+  mutate(Trial=Trial+8,
+         BlockContinuous=4,
+         Block=factor("4",levels=c("1","2","3","4")),
+         Phase = factor("Test phase",levels=c("Exposure phase","Test phase")))
+# Have participants hear a test block like in the experiment
+d.gamm.fake_experiment.block4 <- d.gamm %>% filter(BlockContinuous==3) %>%
+  mutate(Trial=Trial+8,
+         BlockContinuous=4,
+         Block=factor("4",levels=c("1","2","3","4")),
+         Phase = factor("Test phase",levels=c("Exposure phase","Test phase")),
+         OrigCondition=Condition,
+         Condition=factor("accented",levels=c("unaccented","accented")))
+# Getting the actual data
+d.gamm.real.block4 <- dat_out2 %>%
+  filter(Condition %in% c("accented","unaccented") &
+           Run %in% c("Exp2v1","ExpPilotv1","Exp2v2")) %>%
+  within(., {
+    WorkerId <- factor(WorkerId)
+    # sum coding for accent condition
+    Condition <- factor(Condition, levels = c("unaccented","accented"))
+  	contrasts(Condition) <- cbind("accented" = c(-1,1))
+  	# Make the unordered version of Condition 
+  	Condition.unordered <- Condition
+  	# Make the ordered version
+  	Condition <- ordered(Condition)
+  	Trial <- TrialInExperiment-max(Trial[Block=="0"])
+  	BlockTrial <- Trial-floor((Trial-1)/8)*8
+  	BlockTrial.c <- BlockTrial-mean(BlockTrial)
+  }) %>% filter(Block=="4") %>%
+  mutate(BlockContinuous=4,
+         Block=factor("4",levels=c("1","2","3","4")),
+         OrigCondition=Condition)
+```
+  
+```{r making predictions}
+
+d.gamm$Predict                        <- m.full.block_contin %>% predict.gam(d.gamm)
+d.gamm.fake_extended.block4$Predict   <- m.full.block_contin %>% predict.gam(d.gamm.fake_extended.block4)
+d.gamm.fake_experiment.block4$Predict <- m.full.block_contin %>% predict.gam(d.gamm.fake_experiment.block4)
+d.gamm.fake_experiment.block4$Condition<-d.gamm.fake_experiment.block4$OrigCondition
+
+d.gamm.compare <- bind_rows(
+  "Actual" = bind_rows(d.gamm, d.gamm.real.block4) %>%                       mutate(Data=AdjustedRT),
+  "PredSameAcc" = bind_rows(d.gamm, d.gamm.fake_extended.block4) %>%   mutate(Data=Predict),
+  "PredExperiment" = bind_rows(d.gamm, d.gamm.fake_experiment.block4) %>% mutate(Data=Predict),
+  .id="DataType")
+  
+```
+
+# Visualization of predicted values
+
+```{r comparing predictions, fig.width = 11, fig.height = 8,fig.cap="The adjusted RTs for correct trials in the main experiment, for both the actual data (Actual), and the predicted adjusted RTs for two scenarios: one emulating a situation in which all participants hear the accented talker in the fourth block (PredExperiment, as in the real experiment), and when they hear the same talker they heard in exposure (PredSameAcc). The predicted exposure values for PredExperiment and PredSameAcc are identical. The predicted data for the fourth block was generated by a model fit to the exposure blocks.\\label{fig:adj_rt_by_trial_combined}"}
+# make sure you don't plot old plot
+g1<-NULL
+# axis defaults
+rt_coord_lim <- c(-150, 1000)
+rt_y_label <- "Adjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+block_fill_palette <- rep(c("#f1f1f1", "white"),100)[1:(length(unique(d.gamm.compare$BlockContinuous))*
+                                                       length(unique(d.gamm.compare$DataType)))]
+fatten_val <- 5
+base_font_size <- 15
+strip_text_size <- 14
+
+# exp2 defaults
+palette_exp2 <- c("red", "grey30")
+
+# df containing shape info for background shading of blocks
+rects <- d.gamm.compare %>%
+  filter(!is.na(Phase)) %>% group_by(Block) %>%
+  summarise(Phase=first(Phase),
+            xstart_rect = min(Trial)-0.5,
+            xend_rect   = max(Trial)+0.5,
+            x_seg = mean(Trial),
+            y_seg_RTs = rt_coord_lim[2],
+            y_seg_errors = 0.5) %>%
+  mutate(Block=paste("Block",Block))
+
+# RTs by trial and condition
+p1 <- d.gamm.compare %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  ggplot(aes(x = Trial, y = Data, colour = Condition)) +
+  facet_grid(DataType~Phase, scales = "free_x") +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect,
+                              ymin = -Inf, ymax = Inf),
+            fill = block_fill_palette,
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs, label = Block),
+            inherit.aes = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", geom = "pointrange",
+               position = position_dodge(.15),
+               fatten = fatten_val,
+               alpha = .7) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("Trial", breaks = seq(1,32,1), expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c(accented="Indian-accented", unaccented="Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c(accented="Indian-accented", unaccented="Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=rt_coord_lim)
+
+# change grob widths so exposure phase is 3x wider than test phase
+# (i.e., since there are 3x more exposure trials)
+g1 <- ggplotGrob(p1) 
+g1$widths[[4]] <- unit(3, "null") 
+
+
+library(grid)
+grid.newpage()
+grid.draw(g1)
+```
+
+
+```{r pred_compare_linear_by_block, fig.width = 11, fig.height = 8,fig.cap="The linear trends per Block for the actual adjusted RTs (Actual), the predicted RTs for when all participants hear the accented voice (PredExperiment), and the predicted RTs for the scenario where participants would hear a fourth block in the same accent as they heard in exposure (PredSameAcc). The predicted exposure values for PredExperiment and PredSameAcc are identical.\\label{fig:pred_compare_linear_by_block}"}
+rull_story<-NULL
+# axis defaults
+rt_y_label <- "Unadjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+dodge_amt <- 0.9
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+rull_story <- d.gamm.compare %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  ggplot(aes(x = Trial, y = Data, colour = Condition, group=paste0(Block,Condition,DataType))) +
+  facet_wrap(~ DataType, scales = "free_x",nrow=3) +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect,
+                              ymin = -Inf, ymax = Inf),
+            fill = rep(block_fill_palette,1),
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs-300, label = Block),
+            inherit.aes = FALSE) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("", breaks = NULL, expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c(accented="Indian-accented", unaccented="Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c(accented="Indian-accented", unaccented="Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=c(-150,750))
+
+rull_story
+```
+
+
+# Overall thoughts/feelings/questions
+
+These results don't strike me as _super_ encouraging, at least in the sense that they don't _seem_ to suggest that there's adaptation in the _exposure_ phase, which might matter for the pupillometry.  However, it might be interesting to compare these results (which come from the experiments where there were passive listening sections between blocks) to the results where there were no passive listening blocks (which seemed to have much stronger results).
+
+Like I said earlier, I'm less certain of how to use the actual test block data to measure adaptation in the context of a GAM model.  Would it be fair to compare the actual results with the predicted values?
+
+\FloatBarrier
+
+# Results from older experiments
+
+## Exp1
+
+```{r other model gamm stuff,echo=TRUE,cache=TRUE}
+m.ex1.full.block_contin <- gam(AdjustedRT ~ 
+      # Linear predictors
+      Condition + #BlockContinuous + BlockContinuous:Condition +
+      # Non linear predictors
+      ti(BlockContinuous, k=3) +
+      ti(BlockTrial, k=7) +
+      ti(BlockContinuous, by=Condition, k=3) +
+      ti(BlockTrial, BlockContinuous, k=3) +
+      ti(BlockTrial, by=Condition, k=7) +
+      ti(BlockTrial, BlockContinuous, by=Condition, k=3) +
+      # Random effects
+      s(WorkerId, bs="re") + #Random intercept
+      s(WorkerId, BlockTrial, bs="re"),  # Random slope
+    data = d.gamm.ex1 %>% filter(BinaryCorrect==1)
+      )
+summary(m.ex1.full.block_contin)
+
+#summary(m..full.block_contin)
+plot(m.ex1.full.block_contin,pages=2)
+```
+
+\FloatBarrier
+
+## Exp1b: Different wording
+
+```{r,echo=TRUE,cache=TRUE}
+m.wording.full.block_contin <- gam(AdjustedRT ~ 
+      # Linear predictors
+      Condition + #BlockContinuous + BlockContinuous:Condition +
+      # Non linear predictors
+      ti(BlockContinuous, k=3) +
+      ti(BlockTrial, k=7) +
+      ti(BlockContinuous, by=Condition, k=3) +
+      ti(BlockTrial, BlockContinuous, k=3) +
+      ti(BlockTrial, by=Condition, k=7) +
+      ti(BlockTrial, BlockContinuous, by=Condition, k=3) +
+      # Random effects
+      s(WorkerId, bs="re") + #Random intercept
+      s(WorkerId, BlockTrial, bs="re"),  # Random slope
+    data = d.gamm.wording %>% filter(BinaryCorrect==1)
+      )
+summary(m.wording.full.block_contin)
+
+```
+
+# Results with a different trial and block predictor
+
+```{r even newer stuff,echo=TRUE,cache=FALSE}
+m.full.no_block <- gam(AdjustedRT ~ 
+      # Linear predictors
+      Condition + #BlockContinuous + BlockContinuous:Condition +
+      # Non linear predictors
+      ti(Trial.c) +
+      ti(BlockTrial, k=7) +
+      ti(Trial.c, by=Condition) +
+      ti(BlockTrial, Trial.c, k=7) +
+      ti(BlockTrial, by=Condition, k=7) +
+      ti(BlockTrial, Trial.c, by=Condition, k=7) +
+      # Random effects
+      s(WorkerId, bs="re") + #Random intercept
+      s(WorkerId, BlockTrial, bs="re"),  # Random slope
+    data = d.gamm %>% filter(BinaryCorrect==1)
+      )
+summary(m.full.no_block)
+plot(m.full.no_block,pages=2)
+
+```
+
+
+\FloatBarrier
+
+
+## Similar results from previous experiments
+
+## Exp1
+
+```{r even newer stuff for older stuff,echo=TRUE,cache=TRUE}
+m.ex1.full.no_block <- gam(AdjustedRT ~ 
+      # Linear predictors
+      Condition + #BlockContinuous + BlockContinuous:Condition +
+      # Non linear predictors
+      ti(Trial.c) +
+      ti(BlockTrial, k=7) +
+      ti(Trial.c, by=Condition) +
+      ti(BlockTrial, Trial.c, k=7) +
+      ti(BlockTrial, by=Condition, k=7) +
+      ti(BlockTrial, Trial.c, by=Condition, k=7) +
+      # Random effects
+      s(WorkerId, bs="re") + #Random intercept
+      s(WorkerId, BlockTrial, bs="re"),  # Random slope
+    data = d.gamm.ex1 %>% filter(BinaryCorrect==1)
+      )
+summary(m.ex1.full.no_block)
+plot(m.ex1.full.no_block,pages=2)
+```
+
+\FloatBarrier
+
+## Exp1b: Different wording
+
+```{r even newer stuff for older stuff2,echo=TRUE,cache=TRUE}
+
+m.wording.full.no_block <- gam(AdjustedRT ~ 
+      # Linear predictors
+      Condition + #BlockContinuous + BlockContinuous:Condition +
+      # Non linear predictors
+      ti(Trial.c) +
+      ti(BlockTrial, k=7) +
+      ti(Trial.c, by=Condition) +
+      ti(BlockTrial, Trial.c, k=7) +
+      ti(BlockTrial, by=Condition, k=7) +
+      ti(BlockTrial, Trial.c, by=Condition, k=7) +
+      # Random effects
+      s(WorkerId, bs="re") + #Random intercept
+      s(WorkerId, BlockTrial, bs="re"),  # Random slope
+    data = d.gamm.ex1 %>% filter(BinaryCorrect==1)
+      )
+summary(m.wording.full.no_block)
+
+```

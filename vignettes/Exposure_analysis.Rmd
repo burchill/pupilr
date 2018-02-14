@@ -1,0 +1,1766 @@
+---
+title: "MTurk Pupillometry Analysis (Exposure)"
+author: "Zach Burchill"
+date: \today
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{siunitx}
+  - \usepackage{tabto}
+  - \usepackage{soul}
+  - \usepackage{xcolor}
+  - \usepackage{placeins}
+  - \usepackage{lscape}
+  - \newcommand{\blandscape}{\begin{landscape}}
+  - \newcommand{\elandscape}{\end{landscape}}
+  - \makeatletter\renewcommand{\fps@table}{!ht}\makeatother
+  - \setstcolor{red}
+  - \usepackage{sectsty}
+  - \sectionfont{\color{red}} 
+  - \subsectionfont{\color{red}}
+  - \subsubsectionfont{\color{red}}
+  - \paragraphfont{\color{red}}
+  - \subparagraphfont{\color{red}}
+output:
+  pdf_document:
+    fig_caption: true
+    toc: true
+    toc_depth: 4
+    number_sections: true
+---
+
+```{r set-options, echo=FALSE, cache=FALSE, warning=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(comment="", 
+               autodep = TRUE,
+                 cache=FALSE, 
+               echo=FALSE, 
+               warning=FALSE, message=FALSE)
+
+```
+
+```{r libraries}
+# library(magrittr)
+# library(dplyr) 
+# library(ggplot2)
+# library(tidyr)
+
+# Kodi's libraries
+library(dplyr) # uses pre-0.5 version
+library(magrittr)
+library(stringr)
+library(ggplot2)
+library(ggthemes)
+require(lme4)
+library(lmerTest)
+library(tidyr)
+library(grid)
+library(gridExtra)
+
+library(pupilr)
+library(zplyr)
+
+source("/Users/zburchill/clarkegarrett2004/Exp1/Analysis/helper_functions/create_lmer_table.R")
+```
+
+```{r functions}
+left_join_and_overwrite <- function(x, y, by = NULL, copy = FALSE, ...) {
+  by <- dplyr::common_by(by,x,y)
+  incoming_cols <- dplyr::setdiff(names(y),by$y)
+  dplyr::left_join(dplyr::select(x,-one_of(incoming_cols)), y, by, copy, ...)
+}
+  
+redo_Z_scores <- function(df) {
+  zscores_df <- df %>% group_by(WorkerId,Condition,Block) %>%
+    summarise(BlockmeanRT=mean(RT)) %>% 
+    group_by(Condition,Block) %>%
+    mutate(Rt.Z = (BlockmeanRT-mean(BlockmeanRT))/sd(BlockmeanRT)) %>% 
+    ungroup() %>%
+    select(WorkerId,Block,Rt.Z)
+  return(left_join_and_overwrite(df,zscores_df,by=c("WorkerId","Block")))
+}
+
+# calculate subject-wise mean RT for each Block
+initialize_scores <- function(df) {
+  df %<>%
+  mutate(Phase=as.factor(ifelse(Block=="4","Test phase",
+                         ifelse(Block %in% c("1","2","3"),"Exposure phase",NA)))) %>%
+  group_by(WorkerId, Condition, Block) %>%
+  mutate(
+    subjMean_BlockRT = mean(RT),
+    subjMean_BlockAcc = mean(BinaryCorrect)
+  ) %>%
+  ungroup() %>%
+  group_by(Block) %>%
+  mutate(Rt.Z = (subjMean_BlockRT-mean(subjMean_BlockRT))/sd(subjMean_BlockRT),
+         Acc.Z = (subjMean_BlockAcc-mean(subjMean_BlockAcc))/sd(subjMean_BlockAcc)) %>%
+  ungroup() %>%
+  redo_Z_scores() %>%
+  as.data.frame()
+  return(df)
+}
+
+# Given a ggplot object, a dataframe, a list of vectors of conditions, and a list of names, builds a plot
+build_facet_plot <-function(p,df,l_of_v,l_of_titles,rect_df=FALSE) {
+    combined_ls<-purrr::map2(l_of_v,l_of_titles,list)
+    v <- purrr::reduce(combined_ls,
+                  function(a,b) {
+                    
+                    if (rect_df==FALSE) {
+                        t <- a
+                    } else {
+                      t <- a + geom_rect(data = transform(rect_df,Comparison=b[[2]]), 
+                                         aes(xmin = xstart_rect, xmax = xend_rect,
+                                             ymin = -Inf, ymax = Inf),
+                                         fill = rect_df$colors,inherit.aes = FALSE)
+                    }
+
+                    t <- t + stat_summary(fun.data="mean_cl_boot", geom="errorbar", width=0.25,
+                                          data=transform(subset(df,Condition %in% b[[1]]),
+                                                         Comparison=b[[2]]))
+                    t <- t + stat_summary(fun.y=mean,geom="point",
+                                          data=transform(subset(df,Condition %in% b[[1]]),
+                                                         Comparison=b[[2]]))
+                    t <- t + stat_summary(fun.y=mean,geom="line",
+                                          data=transform(subset(df,Condition %in% b[[1]]),
+                                                         Comparison=b[[2]]))
+                    return(t)}, 
+                  .init=p)
+    v <- v + facet_wrap(~Comparison)
+    return(v)
+}
+
+errorbars <- function(gg_obj) {
+  ggplot2::`%+%`(
+    ggplot2::`%+%`(
+      gg_obj,
+      stat_summary(fun.data = mean_cl_boot, geom = "errorbar")
+    ),
+    stat_summary(fun.y=mean,geom = "point")
+  )
+}
+dot_and_bars <-function(gg_obj) {
+  ggplot2::`%+%`(
+      gg_obj,
+      geom_dotplot(binaxis = "y", stackdir = "center", dotsize = 0.5,alpha=0.2)
+      ) %>%
+    errorbars()
+}
+dot_plot_by_factor <-function(df,x_factor="Condition") {
+  df %>% group_by(WorkerId) %>%
+    summarise_(accuracy="mean(BinaryCorrect)",
+               factor=paste0("first(",x_factor,")")) %>%
+    ggplot(aes(x=factor,y=accuracy,color=factor,fill=factor)) %+%
+    xlab(x_factor) %>% dot_and_bars()
+}
+
+
+## ------------------------------------------ 
+# When using geom_dotplot() to create a "histogram" where each observation
+# is a single dot, the y-axis values default to density values from 0 to 1.
+# THIS FUNCTION takes ggplot dotplot object and identifies y-axis limits
+# that correspond to counts.
+get_y_max <- function(plot_data, ymin = 0, scalar = 1, binwidth = 1) {
+  
+  # identify x-axis variable from plot
+  x_var <- p$mapping$x
+  
+  # select x-axis data
+  x_data <- p$data %>%
+    ungroup() %>%
+    select_(lazyeval::interp(~variable, variable = x_var))
+  
+  # determine the number of bins, given the range of the data
+  # and the specified binwidth
+  number_of_bins <- x_data %>% 
+    ungroup() %>% 
+    summarise_(
+      .dots = lazyeval::interp(~diff(range(variable)) / binwidth, 
+                               variable = x_var)
+    ) %>%
+    as.numeric(.)
+  
+  # Determine the maximum number of observations in a given bin.
+  # This value (optional scaled by a constant) will become the y-axis upper bound
+  y_max <- x_data %>%
+    summarise_(
+      .dots = lazyeval::interp(~ceiling(max(table(cut(variable, number_of_bins)))) * scalar,
+                               variable = x_var)
+    ) %>%
+    as.numeric(.)
+  
+  # specify ylimits
+  y_lim <- c(0, y_max)
+  
+  return(y_lim)
+  
+}
+
+## ------------------------------------------ 
+# Change font color with proper rendering across latex and html outputs
+# credit to Nicholas Hamilton (http://stackoverflow.com/questions/29067541/rmarkdown-how-to-change-the-font-color)
+font_color = function(x, color){
+  outputFormat = opts_knit$get("rmarkdown.pandoc.to")
+  if(outputFormat == 'latex')
+    paste("\\textcolor{",color,"}{",x,"}",sep="")
+  else if(outputFormat == 'html')
+    paste("<font color='",color,"'>",x,"</font>",sep="")
+  else
+    x
+}
+
+## ------------------------------------------ 
+# source R scripts from github repository
+# source_https <- function(u, unlink.tmp.certs = FALSE) {
+#   # load package
+#   require(RCurl)
+#  
+#   # read script lines from website using a security certificate
+#   if(!file.exists("cacert.pem")) download.file(url="http://curl.haxx.se/ca/cacert.pem", destfile = "cacert.pem")
+#   script <- getURL(u, followlocation = TRUE, cainfo = "cacert.pem")
+#   if(unlink.tmp.certs) unlink("cacert.pem")
+#  
+#   # parase lines and evealuate in the global environement
+#   eval(parse(text = script), envir= .GlobalEnv)
+# }
+
+## ------------------------------------------ 
+## source lmer tools
+## ------------------------------------------ 
+# this script contains functions for assessing collinearity
+# vir.mer(); kappa.mer(); maxcorr.mer()
+#source_https("https://raw.githubusercontent.com/aufrank/R-hacks/master/mer-utils.R")
+
+library(RCurl)
+source("https://raw.githubusercontent.com/aufrank/R-hacks/master/mer-utils.R")
+
+
+```
+
+```{r color and plot stuff}
+#color scheme for accented stuff (dark to light): #e6550d #fdae6b #fee6ce
+#color scheme for unaccented stuff (''): #3182bd #9ecae1 #deebf7
+color_values <- c("accented" = "#e6550d", "unaccented" = "#3182bd",
+              "accented new" = "#fdae6b","unaccented new" = "#9ecae1")
+```
+
+
+```{r load data,warning=TRUE,message=TRUE}
+d.all <- d.ex2 # %>% filter(Run!="Exp2v2")
+d.all$ExpRun <- ifelse(d.all$Run=="Exp2v2", "Run2","Run1")
+d.noexp1 <- d.ex1
+print("Does the data pass the sanity check?")
+sanity_check_data(d.all,pilot=FALSE)
+sanity_check_data(d.noexp1,pilot=FALSE)
+d.all$PartOfExp <- factor(d.all$PartOfExp,levels=c("practice","main","baseline"))
+d.noexp1$PartOfExp <- factor(d.noexp1$PartOfExp,levels=c("practice","main","baseline"))
+
+# Load data for wording test
+d.wording <- d.ex1_wording_test
+d.wording$PartOfExp <- factor(d.wording$PartOfExp,levels=c("practice","main","newtest","baseline"))
+#d.wording$PartOfExp <- ifelse(d.wording$PartOfExp == "newtest","baseline",d.wording$PartOfExp)
+#d.wording$Condition <- "New"
+#d.wording$LoadTime <- NULL
+
+# Load data for the exposure blocks
+d.exposure_trials <- d.ex2.exposure
+d.catch_trials <- d.exposure_trials %>% 
+  group_by(WorkerId) %>%
+  summarise(Misses=sum(ifelse(isCatch==TRUE & pressedSpace==FALSE,1,0)),
+         FalsePositives=sum(ifelse(isCatch==FALSE & pressedSpace==TRUE,1,0)),
+         AvgCorrectRT=mean(RT[isCatch==TRUE & pressedSpace==TRUE]))
+
+# Load in language background free response questions
+d.LgFreeNoExp <- read.csv("/Users/zburchill/clarkegarrett2004/Exp1/Analysis/no_exposure_pupillometry_language_free_response.csv")
+d.LgFreeExp <- read.csv("/Users/zburchill/clarkegarrett2004/Exp2/Analysis/exposure_pupil_lgbackground_free_response.csv") %>% select(WorkerId,LgRating)
+suppressWarnings( d.all <- left_join(d.all,d.LgFreeExp,by="WorkerId") )
+suppressWarnings( d.noexp1 <- left_join(d.noexp1, d.LgFreeNoExp,by="WorkerId") )
+suppressWarnings( d.wording <-left_join(d.wording,d.LgFreeNoExp,by="WorkerId") )
+
+# calculate subject-wise mean RT for each Block
+d.all <- initialize_scores(d.all)
+d.noexp1 <- initialize_scores(d.noexp1)
+d.wording <- initialize_scores(d.wording)
+
+# Prepare some new survey questions
+d.all <- d.all %>% 
+  mutate_each(
+    funs(factor(.,
+      levels=c("","dont_remember","never","hardly","sometimes","weekly","daily_plus"))),
+    matches("last_week|last_month|childhood"))
+```
+
+
+
+```{r outlier-exclusion-step1-1, echo = FALSE}
+
+duplicate_turkers <- d.all %>% select(WorkerId,UniqueID) %>%
+  rbind(d.noexp1 %>% select(WorkerId,UniqueID),
+        d.wording %>% select(WorkerId,UniqueID)) %>%
+  distinct(WorkerId,UniqueID,.keep_all=TRUE) %>%
+  group_by(WorkerId) %>% 
+  tally() %>%
+  filter(n > 1)
+
+if (nrow(duplicate_turkers) > 0) {
+  print("WARNING! DUPLICATE TURKERS! DO SOMETHING ABOUT THIS BETTER THAN WHAT WE HAVE RIGHT NOW!")
+}
+
+## ----------------------------------------
+# collect all non eligible subjets into a single df
+non_eligible_subjs_all <- pupilr::non_eligible_participants_f(
+  d.all,
+  duplicate_turkers = duplicate_turkers,
+  newsurvey = TRUE)
+non_eligible_subjs_word <- pupilr::non_eligible_participants_f(
+  d.wording,
+  duplicate_turkers = duplicate_turkers,
+  newsurvey = FALSE)
+non_eligible_subjs_noexp <- pupilr::non_eligible_participants_f(
+  d.noexp1,
+  duplicate_turkers = duplicate_turkers,
+  newsurvey = FALSE)
+
+## ----------------------------------------
+# remove those inelligible subjects 
+dat_out1 <- d.all %>%
+  filter(
+    !(WorkerId %in% non_eligible_subjs_all$WorkerId)
+  )
+dat_noexp_out1 <- d.noexp1 %>%
+  filter(
+    !(WorkerId %in% non_eligible_subjs_noexp$WorkerId)
+  )
+d.wording_out <- d.wording %>%
+  filter(
+    !(WorkerId %in% non_eligible_subjs_word$WorkerId)
+  )
+```
+
+```{r outlier-removal-step2, echo = FALSE}
+dat_out2 <- pupilr::exclude_extreme_rts_f(dat_out1)
+d.wording_out2 <- pupilr::exclude_extreme_rts_f(d.wording_out)
+dat_noexp_out2 <- pupilr::exclude_extreme_rts_f(dat_noexp_out1)
+```
+
+```{r calculate adjusted RTs}
+# calculate each subject's mean Baseline RT
+# and subtract that value from experimental RTs
+dat_out2 <- pupilr::calculate_adjustedRT_f(dat_out2)
+d.wording_out2 <- pupilr::calculate_adjustedRT_f(d.wording_out2)
+dat_noexp_out2 <- pupilr::calculate_adjustedRT_f(dat_noexp_out2)
+```
+
+# Overview of study
+
+## Verbal summary
+
+## Experiment 1
+
+At its current stage, is basically a type of over-the-web near-replication of Clarke & Garrett (2004), but with slightly more trials (instead of **4/6 trials per block**, there are now **8**), and featuring an Indian-accented talker.  This experiment was meant to make sure we could find an adaptation effect with our stimuli.  For a more detailed analysis, see the other results report.
+
+## Experiment 2
+
+The current report focuses on the findings of Experiment 2.  Experiment 2 was very similar to Experiment 1 in both task and stimuli, but the visual-probe blocks were interleaved with approximately 7.5 minutes total of the exposure talker reading sections from a short story.  We did this so that participants would have approximately twice as much exposure time to the talkers' voices, and because in the final pupillometric experiment we want to be able to track pupil size while participants are passively listening to accented speech.
+
+### Runs
+
+Due to findings in our comparison between Exp2 and Exp1 (detailed in the overview results report) we ran Exp2 again with 64 subjects, but with different positions for the items.  We'll therefore refer to the original run as "Exp2v1" and the second as "Exp2v2".  This results report will not only give the details of Experiment 2, but allow us to compare these two runs and see the effect of the position of the items.
+
+**Currently, the exclusion criteria for Experiment 2 were applied on both runs lumped together**.
+
+## Total number of subjects
+
+As shown in the tables below, we start with `r d.all %>% group_by(Condition) %>% distinct(WorkerId, .keep_all = TRUE) %>% tally() %>% select(n) %>% min()` participants per condition, the vast majority of whom were monolingual English speakers who used (in-ear or over-ear) headphones to complete the task.
+
+```{r total subjects}
+# How many subjects per condition
+d.all %>%
+  group_by(Condition) %>%
+  distinct(WorkerId) %>%
+  tally() %>%
+  as.data.frame(.) %>%
+  kable(., caption = "Total number of subjects per condition and Run")
+
+# distribution of subjects by language background and audio type
+d.all %>%
+  group_by(LgBackground, AudioType) %>%
+  distinct(WorkerId) %>%
+  tally() %>%
+  as.data.frame() %>%
+  kable(., caption = "Total number of subjects by language background and audio equipment type.")
+```
+
+Figure \ref{fig:distribution-of-subj-wise-mean-RTs-before-exclusions} shows the distribution of subjects' mean raw response time by Block and Condition. Note that for the majority of subjects in each condition, the mean RT in each block was (considerably) less than 2.5 seconds. However, a one or two subjects registered extremely slow RTs (e.g., mean RT ~4 seconds in one or more blocks), which was likely due to divided attention (e.g., multi-tasking during the experiment) or to technical issues affecting the recording of RTs.
+
+```{r distribution-of-subj-wise-mean-RTs-before-exclusions, fig.cap="Distribution of subjects mean RTs by Block and Condition, prior to outlier exclusions.\\label{fig:distribution-of-subj-wise-mean-RTs-before-exclusions}"}
+rt_dist <- d.all %>%
+  distinct(WorkerId, Block, .keep_all = TRUE) %>%
+  filter(subjMean_BlockRT < 10000) %>%
+  # mutate(
+  #   Condition = str_wrap(Condition, width = 3),
+  #   Condition = paste0("\n", Condition)
+  #   ) %>%
+  ggplot(aes(x = subjMean_BlockRT, fill = Condition)) +
+  facet_grid(Condition ~ Block, 
+             labeller = "label_both") +
+  geom_histogram(binwidth = 250, alpha = 0.75, show.legend = FALSE) + 
+  #scale_x_continuous(breaks = c(0, 2500, 5000, 7500, 10000),
+   #                  labels = c("0", "", "5000", "", "1000")) +
+  labs(title = "Distribution of subject-wise mean RTs",
+       subtitle = "plot shows raw data before outlier exclusions\n(subj-wise mean Block RTs > 10 seconds removed for clarity)",
+       x = "mean Block RT") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+rt_dist
+
+```
+
+
+\FloatBarrier
+
+<!-- 
+# ---------------------------------------------------------------------- #
+#   Outlier Exclusion: Step 1 (INELIGIBlE PARTICIPANTS)
+# ---------------------------------------------------------------------- #
+--> 
+
+# Data preparation
+
+## Outlier Exclusion 
+
+Outlier exclusion was a multi-step process. The full set of exclusion criteria and the % of data lost for each criterion at each step are summarized in \ref{sec:summary-of-exclusion-criteria}.
+
+###Step 1: Ineligible participants
+
+The first step of outlier exclusions was to exclude participants who did not meet participation criteria. We excluded the following:
+
+1. **Language background:** non-monolingual English speakers
+
+2. **Audio equipment:** participants who did not use (in-ear or over-ear) headphones 
+
+3. **Accent familiarity:** participants who reported high familiarity with Indian-accented speech 
+    + subjective report of hearing an accent like the one in this experiment regularly or "all the time"
+
+**`r font_color("The number of exclusions based on these eligibility criteria was similar across conditions", color="red")`** (see Table \ref{table:number-of-exclusions-based-on-background-eligibility}).
+
+We additionally implemented an exclusion criterion based on task performance:
+
+4. **"Cheating":** participants with any block mean RT < 200ms 
+
+5. **Task performance:** participants with mean RT in non-practice block > 3 SDs from Condition mean
+
+**NOTE: We did _not_ exclude participants based on mean RTs in the practice block, whereas our previous work had.  Additionally, our previous work _did not exclude_ participants with block means < 200ms**
+
+This fourth criterion was an attempt to identify and remove subjects who consistently registered slow response times because they did not perform the task faithfully (e.g., multi-tasking) or because their computer equipment did not provide reliable recording of RTs over the web. **`r font_color("Again, exclusion rates are relatively similar across conditions", color="red")`** (see Table \ref{table:number-of-subjs-excluded-for-slow-RTs-overall}).
+
+Figure \ref{fig:RT-distribution-after-outlier-removal-step1} shows the distribution of RTs by condition and block *after* removing ineligible participants. 
+
+```{r exclusion tables}
+# # for Step 1.1 reporting purposes:
+non_eligible_subjs_01 <- non_eligible_subjs_all %>% 
+                                 filter(grepl("Step1.1",Reason))
+# for Step 1.2 reporting purposes:
+non_eligible_subjs_02 <- non_eligible_subjs_all %>% 
+                                 filter(grepl("Step1.2",Reason))
+                               
+
+# How many subjects per Condition did not meet participation criteria
+xtabs(~ Condition, non_eligible_subjs_01) %>%
+  addmargins(., FUN = list(TOTAL = sum)) %>%
+  as.data.frame(.) %>%
+  kable(., caption = "Number of subjects excluded per condition based on language background, audio equipment usage, and accent familiarity.\\label{table:number-of-exclusions-based-on-background-eligibility}")
+
+# how many RT-based subject exclusions per Condition
+xtabs(~ Condition, non_eligible_subjs_02) %>%
+  addmargins(., FUN = list(TOTAL = sum)) %>%
+  as.data.frame(.) %>%
+  kable(., caption = "Number of participants excluded based on mean RTs\\label{table:number-of-subjs-excluded-for-slow-RTs-overall}")
+```
+
+
+```{r RT-distribution-after-outlier-removal-step1, fig.cap="plot shows all data after outlier exclusion Step 1\\label{fig:RT-distribution-after-outlier-removal-step1}" }
+# remake RT distribution plot from above (by Condition and Block),
+# but use updated (post-exclusion) data frame, 
+# and keep x-axis range the same
+rt_dist %+% distinct(dat_out1, WorkerId, Block, .keep_all = TRUE) +
+  coord_cartesian(xlim = ggplot_build(rt_dist)$panel$ranges[[1]]$x.range)
+
+```
+
+
+<!-- 
+# ---------------------------------------------------------------------- #
+#   Outlier Exclusion: Step 2 (Trial-wise RTs)
+# ---------------------------------------------------------------------- #
+--> 
+
+### Step 2: Trials with extreme RTs
+
+The second step of outlier removal was to exclude **trials** with atypical RTs. We omitted trials based on the following criteria:
+
+- RTs less than 200ms 
+    + based on the assumption that it takes approx. 200ms to program a motor response; hence RTs less than 200ms from the onset of the target stimulus reflect processing of earlier information
+
+- RTs greater than 3 SDs from subject's mean
+
+**`r font_color("The proportion of trials excluded based on these criteria was similar across conditions", color="red")`** (see Table \ref{table:prop-trials-excluded-per-condition}). 
+
+
+```{r trial-wise effects}
+# Did trial-wise outlier exclusion disproportionately affect any experimental Conditions?
+total_possible_trials=max(d.all$TrialInExperiment)+1
+dat_out2 %>%
+  group_by(WorkerId, Condition) %>%
+  # how many trials were excluded for each Subject
+  # (i.e., 36 total trials - number of usable trials in post-exclusion df)
+  summarise(
+    n_useableTrials = n(),
+    n_excludedTrials = total_possible_trials - n()
+  ) %>% 
+  # proportion of excluded trials per condition
+  group_by(Condition) %>%
+  summarise(
+    n_subjs = length(unique(WorkerId)),
+    n_useableTrials = sum(n_useableTrials),
+    n_excludedTrials = sum(n_excludedTrials),
+    prct_excludedTrials = (n_excludedTrials / (n_useableTrials + n_excludedTrials)) * 100
+  ) %>%
+  mutate(Condition = as.character(Condition)) %>%
+  rbind(list("TOTAL:", sum(.$n_subjs), sum(.$n_useableTrials), sum(.$n_excludedTrials), mean(.$prct_excludedTrials))) %>%
+  kable(., digits = 2,
+        caption = "Proportion of trials excluded per condition.\\label{table:prop-trials-excluded-per-condition}")
+
+```
+
+Figure \ref{fig:distribution-of-useable-trials-from-useable-subjects} shows the distribution of raw RTs after both subject-wise and trial-wise outlier exclusion (i.e., outlier exclusions steps 1 and 2). **There are still a few slow RTs. We could consider adding an upper bound (e.g., exclude RTs > 4 or 5 seconds)?**
+
+```{r distribution-of-useable-trials-from-useable-subjects, fig.cap="The distribution of raw RTs after both subject-wise and trial-wise outlier exclusion (i.e., outlier exclusions steps 1 and 2). Some very slow RTs persist.\\label{fig:distribution-of-useable-trials-from-useable-subjects}"}
+# distribution of useable trials from useable subjects
+dat_out2 %>%
+  filter(PartOfExp != "practice") %>%
+  ggplot(aes(x = RT)) + 
+  geom_histogram() +
+  facet_wrap(~ Block, ncol = 1, labeller = "label_both")
+```
+
+
+Figure \ref{fig:diff-in-baseline-means-pre-vs-post-trialWise-outlier-exclusion} shows `r font_color("the difference between subjects' mean baseline (Block 5) RT when calculated before vs. after exclusion of trial-wise outliers", color="red")`. There are several points to make here:
+
+- For the vast majority of subjects, trial-wise outlier exclusion doesn't affect estimation of baseline RTs
+    + i.e., difference btw baseline calculation methods ~0ms
+
+- However, **`r font_color("when trial-wise outlier exclusion *does* matter, it matters a lot", color="red")`**! 
+    + i.e., for subjects with a non-zero difference on these two baseline RT measures, the mean size of the difference is nearly 400ms.
+    + For perspective, 400ms is several orders of magnitude larger than the expected main effect of accent in this experiment (e.g., in C&G 2004, the difference between accent and control conditions in Block 1 is ~100-150ms across experiments).
+
+- Thus, if we don't exclude trial-wise outliers, we not only massively mis-estimate the baseline RT for a subset of subjects, we also propogate this estimation error into the rest of the data via the RT normaization procedure (experimental RTs - subject's mean baseline RT).
+
+
+```{r diff-in-baseline-means-pre-vs-post-trialWise-outlier-exclusion, fig.cap="The absolute differences of subjects' mean RT on their baseline block with and without trial-wise exclusions. The average change for mean RTs that ARE different is marked with  a dotted line. Without trial-wise exclusions, some participants' adjusted RTs would be quite skewed.\\label{fig:diff-in-baseline-means-pre-vs-post-trialWise-outlier-exclusion}"}
+
+dat_out2 %>%
+  filter(Block == "5") %>%
+  distinct(WorkerId, .keep_all = TRUE) %>%
+  mutate(
+    diff = subjMean_BlockRT_after_trial_exclusion - subjMean_BlockRT,
+    abs_diff = abs(diff),
+    mean_abs_nonzero_diff = mean(abs_diff[abs_diff > 0])
+  ) %>%
+  ggplot(aes(x = abs(diff))) +
+  geom_histogram() +
+  geom_vline(aes(xintercept = mean_abs_nonzero_diff), 
+             colour = "red", linetype = "dashed") +
+  geom_text(inherit.aes=FALSE,aes(x=mean_abs_nonzero_diff-100, y = 30,
+           label = "average size of\nnon-zero difference"),
+           colour = "red") +
+  labs(x = "absolute difference between subjects' mean baseline RT\ncalculated before vs. after trial-wise outlier exclusion") +
+  theme_bw()
+```
+
+
+
+\FloatBarrier
+
+
+
+<!-- 
+# ---------------------------------------------------------------------- #
+#   Comparison of RTs and Accuracy across conditions during practice and baseline
+# ---------------------------------------------------------------------- #
+--> 
+
+## Examine RTs and Accuracy during practice and baseline (after exclusion steps 1 and 2)
+
+Now that we've excluded extreme subject and trial outliers, we can look at the practice and baseline data to assess our high-level predictions about how participants should perform on this web-based task.
+
+1. **One data pattern that we expect to find is that performance (both RTs and accuracy) in the practice and baseline blocks is comparable across experimental conditions.** We expect this because these blocks of the experiment were identical across conditions (i.e., native-accented stimuli presented in the clear).
+    
+    + ... *if performance in the **practice block** differs substantially across conditions*, we would need to consider whether the subjects in each condition were sampled from the same underlying population (e.g., did we run all conditions at approximately the sme time of day?).
+
+    + ... *if performance in the **baseline block** differs substantially across conditions*, we would need to consider whether exposure to different types of speech during the main block of the experiment induced overall differences in task performance (in which case the baseline block doesn't provide a reliable condition-independent "baseline" for normalization purposes).
+
+2. **A second data pattern that we expect to find is evidence of improvement (adaptation) over the course of the task.** One way this would manifest is faster RTs and increased accuracy in the post-experiment baseline block, relative to the practice phase. 
+
+Figure \ref{fig:RT-distribution-across-subjs-during-practice-and-baseline} shows the distribution of subject-wise mean RTs during the practice and baseline blocks as a function of exposure condition. 
+
+1. The distributions are similar across exposure conditions. Thus, listening to foreign-accented speech or speech in noise during the exposure phase did not induce weird response behavior.
+
+2. As expected, RTs are consistently faster and less variable in the baseline block, relative to the practice block, across conditions. Thus, participants are adapting to the task.
+
+Figure \ref{fig:Accuracy-distribution-across-subjs-during-practice-and-baseline} shows the distribution of subject-wise mean Accuracy during the practice and baseline blocks as a function of exposure condition. 
+
+1. There's a bit of variability between conditions during the practice block -- but not enough to be troubling. Performance in the baseline task is comparable across conditions. 
+
+2. Accuracy is _higher_ in practice task than during the baseline task. This is the opposite of what we expected, but the decrease in accuracy may be insignificant. More likely, participants are shifting how much they weigh accuracy in the speed-accuracy trade-off as they get familiarized with the task, preferring quick responses to accuracy.
+
+\textcolor{red}{\textbf{NOTE REGARDING OUTLIER EXCLUSION.}} So far, we haven't implemented any accuracy-based exclusion criteria. Figure \ref{fig:Accuracy-distribution-across-subjs-during-practice-and-baseline} shows that all subjects are above chance-level accuracy in the baseline phase (except for one subject). Hence, I don't think we need to implement accuracy-based exclusions. 
+
+
+```{r RT-distribution-across-subjs-during-practice-and-baseline, fig.width = 11, fig.height = 5, fig.cap = "Distribution of subject-wise RTs during practice and baseline blocks. Each small dot indicates one subject's mean. Dashed lines indicate block means across conditions. As predicted, participants are quicker at responding at the end of the experiment.\\label{fig:RT-distribution-across-subjs-during-practice-and-baseline}"}
+prac_baseline_grand_means <- dat_out2 %>%
+  filter(PartOfExp %in% c("practice", "baseline")) %>%
+  group_by(PartOfExp,ExpRun) %>%
+  summarise( 
+    meanRT_ofPhase = mean(RT),
+    meanAccuracy_ofPhase = mean(BinaryCorrect)
+    ) 
+
+prac_baseline_condition_means <- dat_out2 %>% 
+  filter(PartOfExp %in% c("practice", "baseline")) %>%
+  mutate(PartOfExp = relevel(PartOfExp, ref = "practice")) %>%
+  group_by(WorkerId, Condition, PartOfExp, ExpRun) %>%
+  summarise( 
+    meanRT = mean(RT),
+    meanAccuracy = mean(BinaryCorrect)
+    )
+
+ggplot(prac_baseline_condition_means, 
+       aes(x = Condition, y = meanRT, colour = Condition, fill = Condition)) +
+  facet_grid(ExpRun ~ PartOfExp, labeller = "label_both") +
+  geom_violin(aes(fill = NULL)) +
+  scale_color_manual(values=color_values) +
+  geom_hline(aes(yintercept = meanRT_ofPhase), 
+             data = prac_baseline_grand_means,
+             linetype = "dashed", colour = "grey30", size = 1) +
+  geom_dotplot(binaxis = "y", stackdir = "center", 
+               binpositions = "all", dotsize = 0.5, alpha = 0.3) +
+  stat_summary(fun.data = "mean_cl_boot", geom = "pointrange", 
+               fatten = 3, size = 1) +
+  guides(fill = FALSE, colour = FALSE) +
+  labs(x = "Exposure condition", 
+       y = "mean RT (ms)") +
+  theme_bw() +
+  theme(panel.border = element_blank())  
+```
+
+
+```{r Accuracy-distribution-across-subjs-during-practice-and-baseline, fig.width = 11, fig.height = 5, fig.cap = "Distribution of subject-wise accuracy during practice and baseline blocks. Dashed lines indicate block means across conditions. Against our prediction, participants are slightly more accurate in practice. This appears insignificant, but may be due to participants changing their weighing of their speed-accuracy trade-offs.\\label{fig:Accuracy-distribution-across-subjs-during-practice-and-baseline}"}
+ggplot(prac_baseline_condition_means, 
+       aes(x = Condition, y = meanAccuracy, colour = Condition, fill = Condition)) +
+   facet_grid(ExpRun ~ PartOfExp) +
+  geom_violin(aes(fill = NULL)) +
+  geom_hline(aes(yintercept = meanAccuracy_ofPhase), 
+             data = prac_baseline_grand_means,
+             linetype = "dashed", colour = "grey30", size = 1) +  
+  stat_summary(fun.data = "mean_cl_boot", geom = "pointrange", 
+               fatten = 3, size = 1) +
+  guides(fill = FALSE, colour = FALSE) +
+  labs(x = "Exposure condition", 
+       y = "mean Accuracy") +
+  theme_bw() +
+  theme(panel.border = element_blank())  
+```
+
+
+\FloatBarrier
+
+
+<!-- 
+# ---------------------------------------------------------------------- #
+#   Normalize experimental RTs (relative to baseline)
+# ---------------------------------------------------------------------- #
+--> 
+
+## Normalize experimental RTs relative to baseline
+
+Now that we've completed all trial-wise RT exclusions, we can calculate _normalized_ RTs that take into account each subject's baseline speed on this task. For this procedure, we adjust the RTs on each trial by subtracting out the corresponding subject's mean RT during the baseline phase. We refer to the resulting measure as _adjusted RTs_.
+
+Now we want to check the distribution of adjuted RTs to make sure it seems reasonable, given our expectations about task performance.
+
+Note that we expect baseline RTs to be faster on average than RTs during the experimental block, regardless of exposure condition. We expect this for two reasons. First, the baseline task occurred at the end of the experiment, after participants had adapted to the task. Second, _all_ participants heard native accented speech during the baseline phase; hence, there was no need for accent adaptation during this phase.
+
+**`r font_color("If raw baseline RTs are, indeed, faster on average than raw RTs on experimental trials, then we expect each subject's mean *adjusted* RT (experiment RTs - baseline) to be greater than 0.", color="red")`** 
+
+Figure \ref{fig:distribution-of-subject-mean-AdjustedRTs-during-main-block} shows the distribution of subject-wise mean adjusted RTs during the experimental block, plotted by exposure condition.  **`r font_color("Note that there are several subjects with a mean Adjusted RT of less than 0", color="red")`** (i.e., subjects who were much *slower* during baseline than during the main block).
+
+
+```{r distribution-of-subject-mean-AdjustedRTs-during-main-block, fig.width = 5, fig.height = 6, fig.cap = "...\\label{fig:distribution-of-subject-mean-AdjustedRTs-during-main-block}"}
+# plot distribution of subject-wise mean RTs during experimental block
+binwidth = 40
+
+p <- dat_out2 %>%
+  distinct(WorkerId, .keep_all = TRUE) %>%
+  ggplot(aes(x = meanAdjustedRT, fill = Condition)) +
+  facet_grid(ExpRun ~ Condition) +
+  geom_dotplot(stackgroups = TRUE, binaxis = "x", 
+               binpositions = "all", binwidth = binwidth, method = "histodot") +
+  coord_fixed(ratio = binwidth) +
+  geom_vline(aes(xintercept = 0), colour = "grey20", linetype = "dashed") +
+  labs(title = "Distribution of mean Adjusted RTs",
+       subtitle = "Each dot = one subject's mean adjusted RT\naveraged across Blocks 1 - 4", 
+       x = "mean Adjusted RT") +
+  geom_rangeframe(colour = "black") +
+  theme_bw() +
+  theme(panel.border = element_blank(),
+        legend.position = "none")  
+
+p + 
+  ylim(get_y_max(p, binwidth = binwidth))
+```
+
+
+\FloatBarrier
+
+
+<!-- 
+# ---------------------------------------------------------------------- #
+#   Outlier Exclusion: Step 3 (Subjects with atypical adjusted RTs)
+# ---------------------------------------------------------------------- #
+--> 
+<!--
+## ADDITIONAL OUTLIER EXCLUSION STEP???: Subjects with atypical adjusted RTs
+-->
+
+<!-- 
+Based on visual examination of the distribution of mean Adjusted RTs across subjects (Figure \ref{fig:distribution-of-subject-mean-AdjustedRTs-during-main-block}), we implemented an additional outlier exclusion criterion: participants whose mean Adjusted RT during the experimental blocks (Blocks 1-4) was < -500ms (i.e., participants who were 500ms *slower* on average during the baseline block than during the experimental block). The table below shows the resulting exclusions.
+
+```{r}
+non_eligible_subjs_slowBaseline <- dat_out2 %>%
+  filter(
+    meanAdjustedRT <= - 500
+  ) %>%
+  distinct(WorkerId, .keep_all = TRUE) %>% 
+  select(WorkerId, Condition, meanAdjustedRT)
+
+# how many subjects lost per condition due to slow baseline times
+non_eligible_subjs_slowBaseline %>%
+  count(Condition) %>%
+  kable(., caption = "Number of subjects excluded due to anomalous performance in the baseline block")
+
+# Exclude additional subjects
+dat_out3 <- dat_out2 %>%
+  filter(
+    !(WorkerId %in% non_eligible_subjs_slowBaseline$WorkerId) 
+  )
+
+```
+-->
+
+
+
+<!-- 
+# ---------------------------------------------------------------------- #
+#   Summary of exclusion criteria
+# ---------------------------------------------------------------------- #
+--> 
+
+## Summary of exclusion criteria:\label{sec:summary-of-exclusion-criteria}
+
+- Participant-level exclusions:
+    + non-monolingual English speakers
+    + subjects who used audio equipment other than (in-ear or over-ear) headphones
+    + subjects with high familiarity with Indian-accented English (based on subjective self report)
+    + subjects whose mean RT in any block was > 3 SDs from Condition mean
+    + subjects who had a mean RT in any block < 200 ms
+<!--
+    + subjects whose RTs during the baseline phase were substantially slower on average (by 500ms or more) than during the experimental phase (note: the baseline phase was designed to elicit faster responses than during the experimental phase)
+-->
+
+- Trial-level exclusions:
+    + raw RTs < 200ms
+    + RTs > 3 SDs from subject's mean RT in each block
+
+# Experiment 2
+
+```{r setting up exp1 dataframe}
+#just because it might be useful eventually
+exp1 <- dat_noexp_out2 %>%
+  filter(Condition %in% c("accented","unaccented") &
+           Run %in% c("Exp1V1", "PilotV2", "PilotV3")) %>%
+  within(., {
+  # sum coding for accent condition
+  Condition <- factor(Condition)
+	contrasts(Condition) <- cbind("accented" = c(1,-1))
+	Trial <- TrialInExperiment-max(Trial[Block=="0"])
+	
+	 # sum contrast code List (counterbalancing nuisance factor)
+	List <- factor(List)
+  contrasts(List) <- contr.sum(nlevels(List))
+  colnames(contrasts(List)) <- rownames(contrasts(List))[1:7]
+  
+  # sum code ListID
+  ListID <- factor(sapply(List,function(x){as.numeric(strsplit(as.character(x),"_")[[1]][3])},
+                          USE.NAMES = FALSE))
+  contrasts(ListID) <- contr.sum(nlevels(ListID))
+  
+  #sum code ListOrder
+  ListOrder <- factor(sapply(List,function(x){strsplit(as.character(x),"_")[[1]][4]},
+                          USE.NAMES = FALSE))
+  contrasts(ListOrder) <- contr.sum(nlevels(ListOrder))
+	
+})
+```
+
+
+```{r setting up exp2 dataframe}
+exp2 <- dat_out2 %>%
+  filter(Condition %in% c("accented","unaccented") &
+           Run %in% c("Exp2v1","ExpPilotv1","Exp2v2")) %>%
+  within(., {
+  # sum coding for accent condition
+  Condition <- factor(Condition)
+	contrasts(Condition) <- cbind("accented" = c(1,-1))
+	Trial <- TrialInExperiment-max(Trial[Block=="0"])
+	BlockTrial <- Trial-floor((Trial-1)/8)*8
+	
+	 # sum contrast code List (counterbalancing nuisance factor)
+	List <- factor(List)
+  contrasts(List) <- contr.sum(nlevels(List))
+  colnames(contrasts(List)) <- rownames(contrasts(List))[1:(length(levels(List))-1)]
+  
+  # sum code ListID
+  # Currently considers the new runs completely unrelated
+  ListID <- sapply(List,function(x){as.numeric(strsplit(as.character(x),"_")[[1]][3])},
+                          USE.NAMES = FALSE)
+  ListID <- factor(ifelse(Run=="Exp2v2",
+                          paste0(ListID,"_new"),
+                          ListID))
+  contrasts(ListID) <- contr.sum(nlevels(ListID))
+  
+  #sum code ListOrder
+  ListOrder <- factor(sapply(List,function(x){strsplit(as.character(x),"_")[[1]][4]},
+                          USE.NAMES = FALSE))
+  contrasts(ListOrder) <- contr.sum(nlevels(ListOrder))
+})
+```
+
+```{r setting up run comparison exp2}
+exp2runs <- dat_out2 %>%
+  filter(Condition %in% c("accented","unaccented") &
+           ExpRun %in% c("Run1","Run2")) %>%
+  within(., {
+  # sum coding for accent condition
+  Condition <- factor(Condition)
+	contrasts(Condition) <- cbind("accented" = c(1,-1))
+	Trial <- TrialInExperiment-max(Trial[Block=="0"])
+	
+	 # sum contrast code List (counterbalancing nuisance factor)
+	List <- factor(List)
+  contrasts(List) <- contr.sum(nlevels(List))
+  #colnames(contrasts(List)) <- rownames(contrasts(List))[1:7]
+  
+  # sum code ListID
+  ListID <- factor(sapply(List,function(x){as.numeric(strsplit(as.character(x),"_")[[1]][3])},
+                          USE.NAMES = FALSE))
+  contrasts(ListID) <- contr.sum(nlevels(ListID))
+  
+  #sum code ListOrder
+  ListOrder <- factor(sapply(List,function(x){strsplit(as.character(x),"_")[[1]][4]},
+                          USE.NAMES = FALSE))
+  contrasts(ListOrder) <- contr.sum(nlevels(ListOrder))
+	
+})
+
+
+```
+
+
+## Visual analysis
+
+In this section, we'll plot the two runs separately. To see the visual analysis of them combined, see Section \ref{sec:combined-vis-analysis} in the Appendix.
+
+Let's plot the adjusted RTs by trial (Figure \ref{fig:adj_rt_by_trial}) and by block (Figure \ref{fig:adj_rt_by_block}).  
+
+```{r exp2 rt-by-trial,fig.width = 11, fig.height = 8,fig.cap="The adjusted RTs for correct trials in the main experiment. Note the seeming adaptation to the accented talker in test by the participants in BOTH exposure conditions, unlike what we see in Experiment 1, where adaptation seems to be confined to those in the unaccented exposure condition.\\label{fig:adj_rt_by_trial}"}
+# axis defaults
+rt_coord_lim <- c(-150, 1000)
+rt_y_label <- "Adjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+block_fill_palette <- rep(c("#f1f1f1", "white"), 4)
+fatten_val <- 5
+base_font_size <- 15
+strip_text_size <- 14
+
+# exp2 defaults
+palette_exp2 <- c("red", "grey30")
+
+# df containing shape info for background shading of blocks
+rects <- exp2runs %>%
+  filter(!is.na(Phase)) %>% group_by(Block) %>%
+  summarise(Phase=first(Phase),
+            xstart_rect = min(Trial)-0.5,
+            xend_rect   = max(Trial)+0.5,
+            x_seg = mean(Trial),
+            y_seg_RTs = rt_coord_lim[2],
+            y_seg_errors = 0.5) %>%
+  mutate(Block=paste("Block",Block))
+
+
+
+# rects <- data.frame(Phase = c(rep("Exposure phase", 3), "Test phase"),
+#                     xstart_rect = c(0.5, 6.5, 12.5, 18.5),
+#                     xend_rect = c(6.5, 12.5, 18.5, 24.5),
+#                     x_seg = c(3.5, 9.5, 15.5, 21.5),
+#                     y_seg_RTs = rt_coord_lim[2],
+#                     y_seg_errors = 0.5,
+#                     Block = paste("Block", c(1:4))
+#                     )
+
+# RTs by trial and condition
+p1 <- exp2runs %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  ggplot(aes(x = Trial, y = AdjustedRT, colour = Condition)) +
+  facet_grid(ExpRun ~ Phase, scales = "free_x") +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect, 
+                              ymin = -Inf, ymax = Inf), 
+            fill = block_fill_palette,
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs, label = Block),
+            inherit.aes = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", geom = "pointrange",
+               position = position_dodge(.15),
+               fatten = fatten_val,
+               alpha = .7) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("Trial", breaks = seq(1,32,1), expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=rt_coord_lim)
+
+# change grob widths so exposure phase is 3x wider than test phase
+# (i.e., since there are 3x more exposure trials)
+g1 <- ggplotGrob(p1) 
+g1$widths[[4]] <- unit(3, "null") 
+
+
+library(grid)
+grid.newpage()
+grid.draw(g1)
+
+
+```
+
+```{r exp2_RTs_byBlock,fig.cap="The adjusted mean RTs for each block of the main experiment. You can see that it follows the pattern we expected pretty much, with the unaccented participants doing poorly on the accented test block (block 4). However, unlike in Experiment 1, they seem to be doing equally poorly compared to the accented condition.\\label{fig:adj_rt_by_block}"}
+
+# axis defaults
+rt_y_label <- "Adjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+dodge_amt <- 0.9
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+
+# exp2 defaults
+palette_exp2 <- c("red", "grey30")
+
+rt_byBlock <- exp2runs %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  filter(!is.na(Phase)) %>%
+  filter(BinaryCorrect == 1) %>%
+  ungroup() %>%
+  group_by(WorkerId, Condition, Block, ExpRun, Phase) %>%
+  summarise(
+    meanAdjustedRT = mean(AdjustedRT)
+  ) %>%
+  mutate(
+    Phase = gsub("Test phase", 
+                 "Test phase\n(Indian-accent)",
+                 Phase)
+  ) %>%
+  ggplot(aes(x = Block, y = meanAdjustedRT, colour = Condition)) +
+  geom_dotplot(aes(fill = Condition),
+               binaxis = "y",
+               #binpositions = "all", #wonkily shrinks dots
+               position = position_dodge(dodge_amt),
+               stackdir = "center",
+               dotsize = 0.5,
+               alpha = 0.2) +
+  # stat_summary(fun.data = "mean_cl_boot", 
+  #              geom = "pointrange", 
+  #              position = position_dodge(0),
+  #              fatten = 3,
+  #              show.legend = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "errorbar", 
+               position = position_dodge(dodge_amt2),
+               width = .25,
+               show.legend = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "point", 
+               position = position_dodge(dodge_amt2),
+               size = 2.5,
+               show.legend = FALSE) +
+  stat_summary(aes(group = Condition),
+               fun.y = "mean", 
+               geom = "line",
+               position = position_dodge(dodge_amt2),
+               show.legend = FALSE) +
+  facet_grid( ExpRun ~ Phase, scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dashed", "grey") +
+  coord_cartesian(ylim = c(-500, 1000)) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top")
+
+# change grob widths so exposure phase is 3x wider than test phase
+# (i.e., since there are 3x more exposure trials)
+g1 <- ggplotGrob(rt_byBlock) 
+g1$widths[[4]] <- unit(3, "null") 
+
+
+library(grid)
+grid.newpage()
+grid.draw(g1)
+
+```
+
+
+And the mean accuracy (Figure \ref{fig:acc_by_block}).  
+
+```{r exp2_Accs_byBlock,fig.cap="Each dot is a participant's mean accuracy for a particular block.\\label{fig:acc_by_block}"}
+# axis defaults
+rt_y_label <- "Mean accuracy"
+
+# aesthetic defaults
+dodge_amt <- 0.5
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+acc_byBlock <- exp2runs %>%
+  filter(!is.na(Phase)) %>%
+  group_by(WorkerId, Condition, Block, ExpRun, Phase) %>%
+  summarise(
+    accuracy = mean(BinaryCorrect)
+  ) %>%
+  mutate(
+    Phase = gsub("Test phase", 
+                 "Test phase\n(Indian-accent)",
+                 Phase)
+  ) %>%
+  ggplot(aes(x = Block, y = accuracy, colour = Condition)) +
+  geom_dotplot(aes(fill = Condition),
+               binaxis = "y",
+               #binpositions = "all", #wonkily shrinks dots
+               position = position_dodge(dodge_amt),
+               stackdir = "center",
+               dotsize = 0.5,
+               alpha = 0.2) +
+#   geom_violin(aes(fill=Condition),
+#               alpha=0.3,
+#               position = position_dodge(dodge_amt)) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "errorbar", 
+               position = position_dodge(dodge_amt2),
+               width = .25,
+               show.legend = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "point", 
+               position = position_dodge(dodge_amt2),
+               size = 2.5,
+               show.legend = FALSE) +
+  stat_summary(aes(group = Condition),
+               fun.y = "mean", 
+               geom = "line",
+               position = position_dodge(dodge_amt2),
+               show.legend = FALSE) +
+  facet_grid( ExpRun ~ Phase, scales = "free_x") +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top")
+
+# change grob widths so exposure phase is 3x wider than test phase
+# (i.e., since there are 3x more exposure trials)
+g1 <- ggplotGrob(acc_byBlock) 
+g1$widths[[4]] <- unit(3, "null") 
+
+
+library(grid)
+grid.newpage()
+grid.draw(g1)
+
+```
+
+\FloatBarrier
+
+As in the overview report, we also plot the progression of adaptation within each block (Figure \ref{fig:rull_story}) and adaptation within each block, ignoring the first trial of every block (Figure \ref{fig:rull_without_first}).  Similarly, we look at the unadjusted RTs in log-log space in Figure \ref{fig:rull_story_log_log}.
+
+```{r exp2_devel_by_block_uh,fig.cap="It seems as if Exp2 participants are resetting their adaptation each time they return to the task. There were no audio problems or glitches in how the exposure material was presented, nor were there special instructions before Block 4.\\label{fig:rull_story}"}
+# axis defaults
+rt_y_label <- "Unadjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+dodge_amt <- 0.9
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+rull_story <- exp2 %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  ggplot(aes(x = Trial, y = AdjustedRT, colour = Condition, group=paste0(Block,Condition,ExpRun))) +
+  facet_wrap(~ ExpRun, scales = "free_x",nrow=2) +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect, 
+                              ymin = -Inf, ymax = Inf), 
+            fill = rep(block_fill_palette,1),
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs, label = Block),
+            inherit.aes = FALSE) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("", breaks = NULL, expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                    labels = c("Indian-accented", "Control (unaccented)"),
+                    values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=rt_coord_lim)
+
+rull_story
+```
+
+```{r exp2_devel_by_block,fig.cap="The same as Figure \\ref{fig:rull_story}, but with the first trial of each block excluded from the data.\\label{fig:rull_without_first}"}
+# axis defaults
+rt_y_label <- "Unadjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+dodge_amt <- 0.9
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+rull_story2 <- exp2 %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  filter(!(Trial %in% c(1,9,17,25))) %>%
+  ggplot(aes(x = Trial, y = AdjustedRT, colour = Condition, group=paste0(Block,Condition,ExpRun))) +
+  facet_wrap(~ ExpRun, scales = "free_x",nrow=2) +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect, 
+                              ymin = -Inf, ymax = Inf), 
+            fill = rep(block_fill_palette,1),
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs, label = Block),
+            inherit.aes = FALSE) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("", breaks = NULL, expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                    labels = c("Indian-accented", "Control (unaccented)"),
+                    values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=rt_coord_lim)
+
+rull_story2
+```
+
+
+
+```{r fig.cap="Plotting the UNADJUSTED RTs in log-log space by block.\\label{fig:rull_story_log_log}"}
+exp2 %>%
+ filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  ggplot(aes(x = log(BlockTrial), 
+             y = log(RT), 
+             colour = Condition, 
+             group=paste0(Block,Condition,ExpRun))) +
+  facet_grid(Block ~ ExpRun, labeller = "label_both") +
+  #scale_x_log10(breaks=seq(1,8,1)) + scale_y_log10() +
+  coord_trans(x="exp",y="exp") +
+  stat_smooth(method = "lm",
+              formula = y ~ x,
+              show.legend = FALSE) +
+  stat_summary(fun.data=mean_cl_boot,geom="pointrange",alpha=0.2) +
+  #geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("Trial in Block",
+                     breaks = log(seq(1,8,1)),
+                     labels = seq(1,8,1),
+                     expand = c(0,0)) +
+  ggtitle("Log-log space") +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size))
+```
+
+
+
+
+\FloatBarrier
+
+# By-stimulus analysis
+
+We discussed the fact that due to the counter-balancing methods, each particular trial index only had 8 different audio clips per condition in exposure.  Therefore, individual sentences and trial numbers had lots of potentially dangerous collinearity.
+
+## Accuracy-Trial collinearity
+
+ Figure \ref{fig:accuracy_by_filename} shows the mean accuracy for every audio clip by each speaker. It seems there are six sentences that have means below 0.8 for the accented speaker that seem like they might be significantly bringing down the mean.  Figure \ref{fig:comparing_overall_accuracy} shows that this is somewhat true.
+
+```{r,fig.cap="The average sentence accuracy of both speakers in the exposure blocks (i.e. 1-3) collapsed across trial index. It seems like a lot of the inaccuracy can be attributed to a few sentences.\\label{fig:accuracy_by_filename}"}
+dat_out2 %>% 
+  subset(Block %in% c("1","2","3")) %>% 
+#   group_by(Filename) %>% 
+#   mutate(Acc=mean(BinaryCorrect),n=n()) %>% 
+#   ungroup() %>% 
+#   filter(Acc > 0.8) %>%
+  mutate(speaker=ifelse(grepl("shraddha",Filename),
+                        "accented","regular"),
+         Filename=sapply(Filename,
+                         function(x){
+                           paste0(strsplit(as.character(x),"_")[[1]][3:4],collapse="_")
+                           },
+                         USE.NAMES = FALSE)) %>%
+ggplot(aes(color=ExpRun,x=Filename,y=BinaryCorrect)) %>%
+  zplyr::errorbars(position=position_dodge(0.5)) + 
+  theme_bw() +
+  theme(axis.text.x = element_blank()) +
+  ylab("Accuracy") +
+  facet_wrap(~speaker,scales="free_x",nrow=2)
+```
+
+```{r,fig.cap="The mean accuracy for all sentence stimuli for each speaker, with all the data and without any audio clips with mean accuracies below 0.8. Each point represents an audio clip's mean accuracy. Removing the six low-scoring audio clips makes the accuracies very comparable.\\label{fig:comparing_overall_accuracy}"}
+dat_out2 %>% 
+  subset(Block %in% c("1","2","3")) %>% 
+  group_by(Filename) %>% 
+  mutate(Acc=mean(BinaryCorrect)) %>% 
+  ungroup() %>% 
+  filter(Acc > 0.8) %>%
+  select(-Acc) %>%
+  mutate(speaker=ifelse(grepl("shraddha",Filename),"accented","regular")) %>% 
+  mutate(ttt="Sentences > 0.8") %>%
+  rbind(., dat_out2 %>%
+                 subset(Block %in% c("1","2","3")) %>% 
+                 mutate(speaker=ifelse(grepl("shraddha",Filename),"accented","regular")) %>% 
+                 mutate(ttt="All Data") %>% as.data.frame()
+       ) %>%
+  group_by(Filename,speaker,ttt) %>% 
+  summarise(FilenameAcc=mean(BinaryCorrect)) %>% 
+ggplot(aes(color=speaker,x=speaker,y=FilenameAcc)) + 
+  stat_summary(fun.y=mean,geom="point") + 
+  stat_summary(fun.data=mean_cl_boot,geom="errorbar") +
+  theme(legend.position="none") +
+  geom_point(alpha=0.4) +
+  facet_wrap(~ttt)
+```
+
+## RT-Trial collinearity
+
+Figure \ref{fig:rt_per_clip} shows RTs for each audio clip. Nothing seems striking.
+
+```{r,fig.cap="RTs for each audio clip in the exposure phase. Nothing looks too weird here.\\label{fig:rt_per_clip}"}
+dat_out2 %>% 
+  subset(Block %in% c("1","2","3")) %>% 
+#   group_by(Filename) %>% 
+#   mutate(RT=mean(AdjustedRT),n=n()) %>% 
+#   ungroup() %>% 
+#   filter(Acc > 0.8) %>%
+  mutate(speaker=ifelse(grepl("shraddha",Filename),
+                        "accented","regular"),
+         Filename=sapply(Filename,
+                         function(x){
+                           paste0(strsplit(as.character(x),"_")[[1]][3:4],collapse="_")
+                           },
+                         USE.NAMES = FALSE)) %>%
+  ggplot(aes(color=ExpRun,x=Filename,y=AdjustedRT)) %>%
+  zplyr::errorbars(position=position_dodge(0.5)) + 
+  theme_bw() +
+  theme(axis.text.x = element_blank()) +
+  ylab("RT (ms)") +
+  facet_wrap(~speaker,scales="free_x",nrow=2)
+
+```
+
+
+## Speed-Accuracy by Trial
+
+Figure \ref{fig:speed_accuracy_all_tradeoff} shows speed and accuracy plotted together. 
+
+```{r,fig.cap="Each point represents an audio clip. Those low-accuracy audio clips look a little weird.\\label{fig:speed_accuracy_all_tradeoff}"}
+dat_out2 %>% 
+  subset(Block %in% c("1","2","3")) %>%
+  mutate(speaker=ifelse(grepl("shraddha",Filename),"accented","regular")) %>% 
+  group_by(Filename,speaker) %>%
+  summarise(AdjustedRT=mean(AdjustedRT),
+            BinaryCorrect=mean(BinaryCorrect)) %>%
+ggplot(aes(x=AdjustedRT,y=BinaryCorrect,color=speaker)) +
+  geom_point() +
+  stat_smooth(method=glm,formula=y~poly(x,1)) +
+  ylab("Mean Accuracy") + xlab("Mean AdjRT") +
+  #facet_wrap(~speaker) +
+  ggtitle("Speed vs Accuracy for all exposure trials")
+```
+
+
+# Appendix
+
+Everything after this point is part of the appendix!
+
+## Speed-accuracy for individuals audio clips
+
+```{r}
+dat_out2 %>% 
+  subset(Block %in% c("1","2","3")) %>%
+  filter(grepl("shraddha",Filename)) %>%
+  group_by(Filename) %>% mutate(Keep=min(BinaryCorrect)) %>% filter(Keep==0) %>% ungroup() %>%
+  ggplot(aes(y=AdjustedRT,x=BinaryCorrect)) +
+  geom_point(alpha=0.5) +
+  stat_smooth(method=glm,formula=y~poly(x,1)) +
+  xlab("Correct") + ylab("AdjRT") +
+  scale_x_continuous(breaks=c(0,1)) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.background=element_blank(),
+        panel.border=element_blank(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        plot.background=element_blank(),
+        axis.ticks=element_blank()) +
+  facet_wrap(~Filename,scales="free_y") +
+  ggtitle("Speed vs Accuracy for Accented Talker")
+```
+
+```{r}
+dat_out2 %>% 
+  subset(Block %in% c("1","2","3")) %>%
+  filter(grepl("sarah",Filename)) %>%
+  group_by(Filename) %>% mutate(Keep=min(BinaryCorrect)) %>% filter(Keep==0) %>% ungroup() %>%
+  ggplot(aes(y=AdjustedRT,x=BinaryCorrect)) +
+  geom_point(alpha=0.5) +
+  stat_smooth(method=glm,formula=y~poly(x,1)) +
+  xlab("Correct") + ylab("AdjRT") +
+  scale_x_continuous(breaks=c(0,1)) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank(),
+        panel.background=element_blank(),
+        panel.border=element_blank(),
+        panel.grid.major=element_blank(),
+        panel.grid.minor=element_blank(),
+        plot.background=element_blank(),
+        axis.ticks=element_blank()) +
+  facet_wrap(~Filename,scales="free_y") +
+  ggtitle("Speed vs Accuracy for Unaccented Talker")
+```
+
+\FloatBarrier
+
+## Visual analysis of runs combined\label{sec:combined-vis-analysis}
+
+Here we plot all the data from Experiment 2 as one dataset.
+
+```{r exp2 rt-by-trial_combined,fig.width = 11, fig.height = 8,fig.cap="The adjusted RTs for correct trials in the main experiment. Note the seeming adaptation to the accented talker in test by the participants in BOTH exposure conditions, unlike what we see in Experiment 1, where adaptation seems to be confined to those in the unaccented exposure condition.\\label{fig:adj_rt_by_trial_combined}"}
+# axis defaults
+rt_coord_lim <- c(-150, 1000)
+rt_y_label <- "Adjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+block_fill_palette <- rep(c("#f1f1f1", "white"), 2)
+fatten_val <- 5
+base_font_size <- 15
+strip_text_size <- 14
+
+# exp2 defaults
+palette_exp2 <- c("red", "grey30")
+
+# df containing shape info for background shading of blocks
+rects <- exp2runs %>%
+  filter(!is.na(Phase)) %>% group_by(Block) %>%
+  summarise(Phase=first(Phase),
+            xstart_rect = min(Trial)-0.5,
+            xend_rect   = max(Trial)+0.5,
+            x_seg = mean(Trial),
+            y_seg_RTs = rt_coord_lim[2],
+            y_seg_errors = 0.5) %>%
+  mutate(Block=paste("Block",Block))
+
+# RTs by trial and condition
+p1 <- exp2runs %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  ggplot(aes(x = Trial, y = AdjustedRT, colour = Condition)) +
+  facet_wrap(~Phase, scales = "free_x") +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect, 
+                              ymin = -Inf, ymax = Inf), 
+            fill = block_fill_palette,
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs, label = Block),
+            inherit.aes = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", geom = "pointrange",
+               position = position_dodge(.15),
+               fatten = fatten_val,
+               alpha = .7) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("Trial", breaks = seq(1,32,1), expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=rt_coord_lim)
+
+# change grob widths so exposure phase is 3x wider than test phase
+# (i.e., since there are 3x more exposure trials)
+g1 <- ggplotGrob(p1) 
+g1$widths[[4]] <- unit(3, "null") 
+
+
+library(grid)
+grid.newpage()
+grid.draw(g1)
+
+
+```
+
+```{r exp2_RTs_byBlock_combined,fig.cap="The adjusted mean RTs for each block of the main experiment. You can see that it follows the pattern we expected pretty much, with the unaccented participants doing poorly on the accented test block (block 4). However, unlike in Experiment 1, they seem to be doing equally poorly compared to the accented condition.\\label{fig:adj_rt_by_block_combined}"}
+
+# axis defaults
+rt_y_label <- "Adjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+dodge_amt <- 0.9
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+
+# exp2 defaults
+palette_exp2 <- c("red", "grey30")
+
+rt_byBlock <- exp2runs %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  filter(!is.na(Phase)) %>%
+  filter(BinaryCorrect == 1) %>%
+  ungroup() %>%
+  group_by(WorkerId, Condition, Block, ExpRun, Phase) %>%
+  summarise(
+    meanAdjustedRT = mean(AdjustedRT)
+  ) %>%
+  mutate(
+    Phase = gsub("Test phase", 
+                 "Test phase\n(Indian-accent)",
+                 Phase)
+  ) %>%
+  ggplot(aes(x = Block, y = meanAdjustedRT, colour = Condition)) +
+  geom_dotplot(aes(fill = Condition),
+               binaxis = "y",
+               #binpositions = "all", #wonkily shrinks dots
+               position = position_dodge(dodge_amt),
+               stackdir = "center",
+               dotsize = 0.5,
+               alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "errorbar", 
+               position = position_dodge(dodge_amt2),
+               width = .25,
+               show.legend = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "point", 
+               position = position_dodge(dodge_amt2),
+               size = 2.5,
+               show.legend = FALSE) +
+  stat_summary(aes(group = Condition),
+               fun.y = "mean", 
+               geom = "line",
+               position = position_dodge(dodge_amt2),
+               show.legend = FALSE) +
+  facet_wrap( ~ Phase, scales = "free_x") +
+  geom_hline(yintercept = 0, linetype = "dashed", "grey") +
+  coord_cartesian(ylim = c(-500, 1000)) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top")
+
+# change grob widths so exposure phase is 3x wider than test phase
+# (i.e., since there are 3x more exposure trials)
+g1 <- ggplotGrob(rt_byBlock) 
+g1$widths[[4]] <- unit(3, "null") 
+
+
+library(grid)
+grid.newpage()
+grid.draw(g1)
+
+```
+
+
+```{r exp2_Accs_byBlock_combined,fig.cap="Each dot is a participant's mean accuracy for a particular block.\\label{fig:acc_by_block_combined}"}
+# axis defaults
+rt_y_label <- "Mean accuracy"
+
+# aesthetic defaults
+dodge_amt <- 0.5
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+acc_byBlock <- exp2runs %>%
+  filter(!is.na(Phase)) %>%
+  group_by(WorkerId, Condition, Block, ExpRun, Phase) %>%
+  summarise(
+    accuracy = mean(BinaryCorrect)
+  ) %>%
+  mutate(
+    Phase = gsub("Test phase", 
+                 "Test phase\n(Indian-accent)",
+                 Phase)
+  ) %>%
+  ggplot(aes(x = Block, y = accuracy, colour = Condition)) +
+  geom_dotplot(aes(fill = Condition),
+               binaxis = "y",
+               #binpositions = "all", #wonkily shrinks dots
+               position = position_dodge(dodge_amt),
+               stackdir = "center",
+               dotsize = 0.5,
+               alpha = 0.2) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "errorbar", 
+               position = position_dodge(dodge_amt2),
+               width = .25,
+               show.legend = FALSE) +
+  stat_summary(fun.data = "mean_cl_boot", 
+               geom = "point", 
+               position = position_dodge(dodge_amt2),
+               size = 2.5,
+               show.legend = FALSE) +
+  stat_summary(aes(group = Condition),
+               fun.y = "mean", 
+               geom = "line",
+               position = position_dodge(dodge_amt2),
+               show.legend = FALSE) +
+  facet_wrap( ~ Phase, scales = "free_x") +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top")
+
+# change grob widths so exposure phase is 3x wider than test phase
+# (i.e., since there are 3x more exposure trials)
+g1 <- ggplotGrob(acc_byBlock) 
+g1$widths[[4]] <- unit(3, "null") 
+
+
+library(grid)
+grid.newpage()
+grid.draw(g1)
+
+```
+
+\FloatBarrier
+
+We also plot the progression of adaptation within each block (Figure \ref{fig:rull_story_combined}) and adaptation within each block, ignoring the first trial of every block (Figure \ref{fig:rull_without_first_combined}).  Similarly, we look at the unadjusted RTs in log-log space in Figure \ref{fig:rull_story_log_log_combined}.
+
+```{r exp2_devel_by_block_uh_combined,fig.cap="It seems as if Exp2 participants are resetting their adaptation each time they return to the task. There were no audio problems or glitches in how the exposure material was presented, nor were there special instructions before Block 4.\\label{fig:rull_story_combined}"}
+# axis defaults
+rt_y_label <- "Unadjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+dodge_amt <- 0.9
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+rull_story <- exp2 %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  #filter(!(Trial %in% c(1,9,17,25))) %>%
+  ggplot(aes(x = Trial, y = AdjustedRT, colour = Condition, group=paste0(Block,Condition))) +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect, 
+                              ymin = -Inf, ymax = Inf), 
+            fill = rep(block_fill_palette,1),
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs, label = Block),
+            inherit.aes = FALSE) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("", breaks = NULL, expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                    labels = c("Indian-accented", "Control (unaccented)"),
+                    values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=rt_coord_lim)
+
+rull_story
+```
+
+```{r exp2_devel_by_block_combined,fig.cap="The same as Figure \\ref{fig:rull_story}, but with the first trial of each block excluded from the data.\\label{fig:rull_without_first_combined}"}
+# axis defaults
+rt_y_label <- "Unadjusted RTs (ms)\n(experiment RTs - baseline RT)"
+
+# aesthetic defaults
+dodge_amt <- 0.9
+dodge_amt2 <- 0.0
+base_font_size <- 13
+strip_text_size <- 11
+
+rull_story2 <- exp2 %>%
+  filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  filter(!(Trial %in% c(1,9,17,25))) %>%
+  ggplot(aes(x = Trial, y = AdjustedRT, colour = Condition, group=paste0(Block,Condition))) +
+  geom_rect(data = rects, aes(xmin = xstart_rect, xmax = xend_rect, 
+                              ymin = -Inf, ymax = Inf), 
+            fill = rep(block_fill_palette,1),
+            inherit.aes = FALSE) +
+  geom_text(data = rects, aes(x = x_seg, y = y_seg_RTs, label = Block),
+            inherit.aes = FALSE) +
+  stat_smooth(method = "lm", show.legend = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("", breaks = NULL, expand = c(0,0)) +
+  scale_y_continuous(rt_y_label) +
+  scale_colour_manual("Exposure condition",
+                      labels = c("Indian-accented", "Control (unaccented)"),
+                      values = color_values) +
+  scale_fill_manual("Exposure condition",
+                    labels = c("Indian-accented", "Control (unaccented)"),
+                    values = color_values) +
+  labs(y = rt_y_label) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size),
+        legend.position = "top") +
+  geom_rangeframe(colour = "black") +
+  coord_cartesian(ylim=rt_coord_lim)
+
+rull_story2
+```
+
+
+
+```{r fig.cap="Plotting the UNADJUSTED RTs in log-log space by block.\\label{fig:rull_story_log_log_combined}"}
+exp2 %>%
+ filter(BinaryCorrect == 1) %>%
+  filter(Block %in% c("1","2","3","4")) %>%
+  ggplot(aes(x = log(BlockTrial), 
+             y = log(RT), 
+             colour = Condition, 
+             group=paste0(Block,Condition))) +
+  facet_wrap(~Block, nrow=1, labeller = "label_both") +
+  #scale_x_log10(breaks=seq(1,8,1)) + scale_y_log10() +
+  coord_trans(x="exp",y="exp") +
+  stat_smooth(method = "lm",
+              formula = y ~ x,
+              show.legend = FALSE) +
+  stat_summary(fun.data=mean_cl_boot,geom="pointrange",alpha=0.2) +
+  #geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_continuous("Trial in Block",
+                     breaks = log(seq(1,8,1)),
+                     labels = seq(1,8,1),
+                     expand = c(0,0)) +
+  ggtitle("Log-log space") +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  theme_bw(base_size = base_font_size) +
+  theme(panel.border = element_blank(),
+        strip.text = element_text(size = strip_text_size))
+```
