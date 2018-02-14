@@ -10,6 +10,11 @@ This package has three primary uses:
  
  * Third, it provides a number of helpful functions to further process the eye-tracking data for analysis and plotting.
  
+## Seeing how its used
+
+I've included the PDFs and `.Rmd` files of two internal reports I've made based on this package. You can use these to get a sense of how the code works in action, as well as how I code. Unfortunately, these aren't "real" vignettes in the sense that they are unbuildable in this package (see below).
+ 
+ 
 ## Caveats:
  
 Although this package was designed with documentation and other user/developer-friendly aspects, there are a few essential things that prevent it from being CRAN-worthy, or even super distributable.  
