@@ -9,7 +9,7 @@
 #'   \item{(iii)}{reported high familiarity with accent }
 #' }
 #'
-#' @param d a data frame
+#' @param d a data frame (pre-processed by \code{pupilr})
 #' @param duplicate_turkers a data frame of duplicate participants
 #' @param newsurvey a boolean that is \code{TRUE} when the data frame has the updated survey questions
 #' @return a data frame of workers who need to be excluded
@@ -57,7 +57,7 @@ non_eligible_step1_f <- function(d,
 #' \cr
 #' identify subjects who have mean block RTs < 200ms
 #'
-#' @param df a data frame
+#' @param df a data frame (pre-processed by \code{pupilr})
 #' @return a data frame of workers who need to be excluded
 #'
 #' @export
@@ -80,7 +80,7 @@ non_eligible_cheaters_f <- function(df) {
 #' \cr
 #' identify *eligible* subjects who had a mean block RT > 3 SDs from their Condition block mean.
 #'
-#' @param df a data frame
+#' @param df a data frame (pre-processed by \code{pupilr})
 #' @return a data frame of workers who need to be excluded
 #'
 #' @export
@@ -103,7 +103,7 @@ non_eligible_step2_f <- function(df) {
 
 #' Identify participants to be excluded
 #'
-#' Exclude all participants with the Step 1 ("participant-level") exclusion criteria:
+#' Exclude \emph{all} participants with the Step 1 ("participant-level") exclusion criteria:
 #' \describe{
 #'   \item{(i)}{not monolingual English speakers}
 #'   \item{(ii)}{did not use appropriate audio equipment for the study}
@@ -111,6 +111,9 @@ non_eligible_step2_f <- function(df) {
 #'   \item{(iv)}{subjects whose mean RT in any block was > 3 SDs from Condition mean}
 #'   \item{(v)}{subjects who had a mean RT in any block < 200 ms}
 #' }
+#' 
+#' This corresponds to running \code{\link{non_eligible_step1_f}}, \code{\link{non_eligible_cheaters_f}}, and \code{\link{non_eligible_step2_f}}, one after the other.   
+#' \cr 
 #'
 #' \strong{NOTE:} We did \emph{not} exclude participants based on mean RTs in the practice block, whereas our previous work had.
 #' Additionally, our previous work \emph{did not exclude} participants with block means < 200ms
@@ -118,7 +121,7 @@ non_eligible_step2_f <- function(df) {
 #' \strong{NOTE:} We did \emph{NOT} exclude participants for reasons 1-4 before calculating the standard deviation for reason 5
 #'
 #'
-#' @param d a data frame
+#' @param d a data frame (pre-processed by \code{pupilr})
 #' @param duplicate_turkers a data frame of duplicate participants
 #' @param newsurvey a boolean that is \code{TRUE} when the data frame has the updated survey questions
 #' @return a data frame of workers who need to be excluded, with reasons for exclusion

@@ -1,15 +1,17 @@
 #'
 #' Does a few sanity checks on the experimental data
 #'
-#' Mostly designed as a sanity check for the pilot data so far
+#' Designed to make be run at the beginning of an analysis file on the data being used, to 
+#' make sure that the pre-processing has not majorly screwed up anything with the data
+#' files being used.
 #'
-#' @param df The data frame
+#' @param df a data frame 
+#' @param pilot boolean that is \code{TRUE} when the data frame is from a pilot experiment
 #' @return Nothing
 #' @export sanity_check_data
-sanity_check_data <- function(df,pilot=TRUE) {
+sanity_check_data <- function(df, pilot=TRUE) {
   # You better have dplyr
   if (requireNamespace("dplyr")) {
-    
   } else {
     stop("You need dplyr to run this")
   }

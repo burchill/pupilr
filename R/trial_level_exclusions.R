@@ -3,7 +3,7 @@
 #' This excludes trials with RTs < 200 ms and RTs with that are greater than 3 SDs
 #' from the worker's mean RT.
 #'
-#' @param df the data frame
+#' @param df the data frame (pre-processed by \code{pupilr})
 #' @return the same data frame, but without the excluded RT
 #' @export
 exclude_extreme_rts_f <- function(df) {

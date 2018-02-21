@@ -7,7 +7,7 @@
 non_eligible_step1_f(d, duplicate_turkers, newsurvey = TRUE)
 }
 \arguments{
-\item{d}{a data frame}
+\item{d}{a data frame (pre-processed by \code{pupilr})}
 
 \item{duplicate_turkers}{a data frame of duplicate participants}
 

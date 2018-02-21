@@ -7,7 +7,7 @@
 non_eligible_cheaters_f(df)
 }
 \arguments{
-\item{df}{a data frame}
+\item{df}{a data frame (pre-processed by \code{pupilr})}
 }
 \value{
 a data frame of workers who need to be excluded

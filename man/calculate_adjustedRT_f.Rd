@@ -7,7 +7,7 @@
 calculate_adjustedRT_f(df)
 }
 \arguments{
-\item{df}{a data frame}
+\item{df}{a data frame (pre-processed by \code{pupilr})}
 }
 \value{
 the input data frame, with the new columns, \code{meanBaselineRT}, \code{AdjustedRT}, and \code{meanAdjustedRT}, the last of which represents the participant's mean adjusted RT for the experimental trials

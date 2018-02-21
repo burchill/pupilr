@@ -7,7 +7,7 @@
 initialize_scores(df)
 }
 \arguments{
-\item{df}{a data frame}
+\item{df}{a data frame (pre-processed by \code{pupilr})}
 }
 \value{
 the input data frame but with the new columns

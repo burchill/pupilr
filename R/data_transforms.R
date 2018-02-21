@@ -3,7 +3,7 @@
 #' Calculates each subject's mean Baseline RT and subtracts that value from
 #' the experimental RTs.
 #'
-#' @param df a data frame
+#' @param df a data frame (pre-processed by \code{pupilr})
 #' @return the input data frame, with the new columns, \code{meanBaselineRT}, \code{AdjustedRT}, and \code{meanAdjustedRT}, the last of which represents the participant's mean adjusted RT for the experimental trials
 #'
 #' @export
@@ -30,7 +30,7 @@ calculate_adjustedRT_f <- function(df) {
 #' Calculates the z-scores \strong{within Conditions} and within block number for participants' mean block RT.
 #' Will overwrite any columns named \code{BlockmeanRT} or \code{Rt.Z}.
 #'
-#' @param df a data frame
+#' @param df a data frame (pre-processed by \code{pupilr})
 #' @return the input data frame, with the new columns, \code{BlockmeanRT}, \code{Rt.Z}
 #'
 #' @export
@@ -49,7 +49,7 @@ redo_Z_scores <- function(df) {
 #' Adds/overwrites columns: \code{Phase}, \code{subjMean_BlockRT}, \code{subjMean_BlockAcc},
 #' \code{BlockmeanRT}, and \code{Rt.Z}
 #'
-#' @param df a data frame
+#' @param df a data frame (pre-processed by \code{pupilr})
 #' @return the input data frame but with the new columns
 #'
 #' @export

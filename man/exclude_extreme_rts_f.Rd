@@ -7,7 +7,7 @@
 exclude_extreme_rts_f(df)
 }
 \arguments{
-\item{df}{the data frame}
+\item{df}{the data frame (pre-processed by \code{pupilr})}
 }
 \value{
 the same data frame, but without the excluded RT
