@@ -6,7 +6,7 @@ The original package has three primary uses:
 
  * First, it pre-processes the raw data (which has personally identifiable information and is thus stored on a secure remote server) when run on the data server so that the accessible data no longer has participant information in it. 
  
- * Second, it bundles this data together in a nice, portable package. 
+ * Second, it bundles this data together in a nice, manageable package (for me). 
  
  * Third, it provides a number of helpful functions to further process the eye-tracking data for analysis and plotting.
  
