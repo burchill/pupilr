@@ -2,7 +2,7 @@
 
 This package is the public version of the one which manages a pupillometry (eye-tracking) project. (The original R package is stored as part of a private repository on Bitbucket for confidentiality reasons.) This modified package is put online to showcase the development work I've done on it.
 
-This package has three primary uses: 
+The original package has three primary uses: 
 
  * First, it pre-processes the raw data (which has personally identifiable information and is thus stored on a secure remote server) when run on the data server so that the accessible data no longer has participant information in it. 
  
@@ -10,9 +10,9 @@ This package has three primary uses:
  
  * Third, it provides a number of helpful functions to further process the eye-tracking data for analysis and plotting.
  
-## Seeing how its used
+## Seeing it in action
 
-I've included the PDFs and `.Rmd` files of two internal reports I've made based on this package. You can use these to get a sense of how the code works in action, as well as how I code. Unfortunately, these aren't "real" vignettes in the sense that they are unbuildable in this package (see below).
+I've included the PDFs and `.Rmd` files of two internal reports I've made using this package. You can use these to get a sense of how the code works in action, as well as how I code. Unfortunately, these aren't "real" vignettes in the sense that they are unbuildable in this package (see below).
  
  
 ## Caveats:
