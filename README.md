@@ -12,7 +12,7 @@ The original package has three primary uses:
  
 ## Seeing it in action
 
-I've included the PDFs and `.Rmd` files of two internal reports I've made using this package in the ["vignettes" folder](https://github.com/burchill/pupilr/tree/master/vignettes). You can use these to get a sense of how the code works in action, as well as how I code. Unfortunately, these aren't "real" vignettes in the sense that they are unbuildable in this package (see below).
+I've included the PDFs and `.Rmd` files of two internal reports I've made using this package in the [`vignettes` folder](https://github.com/burchill/pupilr/tree/master/vignettes). You can use these to get a sense of how the code works in action, as well as how I code. Unfortunately, these aren't "real" vignettes in the sense that they are unbuildable in this package (see below).
  
  
 ## Caveats:
